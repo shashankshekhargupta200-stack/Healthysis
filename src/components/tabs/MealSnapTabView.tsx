@@ -29,29 +29,66 @@ interface MealLog extends MealAnalysis {
   timestamp: string;
 }
 
-function isMealAnalysis(value: unknown): value is MealAnalysis {
+interface VaultIngestResult {
+  success: boolean;
+  error?: string;
+  category: string;
+  storageFolder: string;
+  patientSummary: string;
+  alerts: string[];
+  vaultRecord: {
+    id: string;
+    user_id?: string;
+    category?: string;
+    storage_folder?: string;
+    title: string;
+    extracted_data: Record<string, unknown>;
+    created_at: string;
+    patient_summary?: string;
+    clinical_alerts?: string[];
+    file_url?: string | null;
+    document_url?: string | null;
+    storage_path?: string | null;
+  };
+}
+
+function isVaultIngestResult(value: unknown): value is VaultIngestResult {
   if (typeof value !== "object" || value === null) return false;
-  return (
-    "itemName" in value &&
-    typeof value.itemName === "string" &&
-    value.itemName.trim().length > 0 &&
-    "calories" in value &&
-    typeof value.calories === "number" &&
-    Number.isFinite(value.calories) &&
-    value.calories >= 0 &&
-    "protein" in value &&
-    typeof value.protein === "number" &&
-    Number.isFinite(value.protein) &&
-    value.protein >= 0 &&
-    "carbs" in value &&
-    typeof value.carbs === "number" &&
-    Number.isFinite(value.carbs) &&
-    value.carbs >= 0 &&
-    "fats" in value &&
-    typeof value.fats === "number" &&
-    Number.isFinite(value.fats) &&
-    value.fats >= 0
-  );
+  const record = value as Partial<VaultIngestResult>;
+  return record.success === true
+    && typeof record.category === "string"
+    && typeof record.storageFolder === "string"
+    && typeof record.patientSummary === "string"
+    && Array.isArray(record.alerts)
+    && typeof record.vaultRecord === "object"
+    && record.vaultRecord !== null
+    && typeof record.vaultRecord.title === "string"
+    && typeof record.vaultRecord.extracted_data === "object";
+}
+
+function getNumber(value: unknown): number | null {
+  const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function mealAnalysisFromVault(result: VaultIngestResult): MealAnalysis | null {
+  if (result.category !== "diet_meal") return null;
+  const data = result.vaultRecord.extracted_data;
+  const macros = typeof data.macros === "object" && data.macros !== null
+    ? data.macros as Record<string, unknown>
+    : data;
+  const calories = getNumber(data.calories);
+  const protein = getNumber(macros.protein);
+  const carbs = getNumber(macros.carbs);
+  const fats = getNumber(macros.fats);
+  if (calories === null || protein === null || carbs === null) return null;
+  return {
+    itemName: result.vaultRecord.title,
+    calories,
+    protein,
+    carbs,
+    fats: fats ?? 0
+  };
 }
 
 function readMealImage(file: File): Promise<{ dataUrl: string; mimeType: string }> {
@@ -83,6 +120,7 @@ export function MealSnapTabView() {
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [facingMode, setFacingMode] = useState<"environment" | "user">("environment");
   const [analysisResult, setAnalysisResult] = useState<MealAnalysis | null>(null);
+  const [vaultResult, setVaultResult] = useState<VaultIngestResult | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [mealLogs, setMealLogs] = useState<MealLog[]>([]);
@@ -142,6 +180,7 @@ export function MealSnapTabView() {
   useEffect(() => {
     let stream: MediaStream | null = null;
     let active = true;
+    const videoElement = videoRef.current;
 
     const initCamera = async () => {
       try {
@@ -153,9 +192,9 @@ export function MealSnapTabView() {
           stream.getTracks().forEach((track) => track.stop());
           return;
         }
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          await videoRef.current.play();
+        if (videoElement) {
+          videoElement.srcObject = stream;
+          await videoElement.play();
         }
         setHasCameraPermission(true);
         setCameraError(null);
@@ -172,7 +211,7 @@ export function MealSnapTabView() {
     return () => {
       active = false;
       stream?.getTracks().forEach((track) => track.stop());
-      if (videoRef.current) videoRef.current.srcObject = null;
+      if (videoElement) videoElement.srcObject = null;
     };
   }, [capturedImage, facingMode]);
 
@@ -180,80 +219,69 @@ export function MealSnapTabView() {
     imagePromise: Promise<{ dataUrl: string; mimeType: string }>
   ) => {
     setAnalysisResult(null);
+    setVaultResult(null);
     setAnalysisError(null);
     setIsAnalyzing(true);
 
     try {
       const { dataUrl, mimeType } = await imagePromise;
-      const separatorIndex = dataUrl.indexOf(",");
-      if (separatorIndex < 0) throw new Error("The selected image could not be encoded.");
       setCapturedImage(dataUrl);
-
-      const response = await fetch("/api/analyze-meal", {
+      const imageBlob = await fetch(dataUrl).then((response) => response.blob());
+      const file = new File([imageBlob], `healthysis-upload.${mimeType.split("/")[1] || "jpg"}`, { type: mimeType });
+      const formData = new FormData();
+      formData.set("userId", userId ?? "");
+      formData.set("file", file);
+      const response = await fetch("/api/agent/vault-ingest", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image: dataUrl.slice(separatorIndex + 1), mimeType })
+        headers: session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : undefined,
+        body: formData
       });
-      const body: unknown = await response.json().catch(() => null);
-      if (!response.ok) {
-        const message =
-          typeof body === "object" && body !== null && "error" in body && typeof body.error === "string"
-            ? body.error
-            : "Meal analysis failed. Please try again.";
-        throw new Error(message);
+      const responseText = await response.text();
+      let parsedBody: unknown;
+      try {
+        parsedBody = responseText ? JSON.parse(responseText) as unknown : null;
+      } catch {
+        throw new Error("Document analysis returned an unreadable response.");
       }
-      if (!isMealAnalysis(body)) throw new Error("The analysis service returned invalid nutrition data.");
-
-      setAnalysisResult(body);
+      const body = isVaultIngestResult(parsedBody) ? parsedBody : null;
+      const serverError = typeof parsedBody === "object" && parsedBody !== null && "error" in parsedBody && typeof parsedBody.error === "string"
+        ? parsedBody.error
+        : null;
+      if (!response.ok || !body) {
+        throw new Error(serverError || response.statusText || "Document analysis failed. Please try again.");
+      }
+      setVaultResult(body);
       if (user?.isGuest && userId) {
-        const localMeal: MealLog = {
-          ...body,
-          id: crypto.randomUUID(),
-          timestamp: new Date().toISOString()
-        };
+        const existingVault = readUserLocalData<VaultIngestResult["vaultRecord"][]>(userId, "patient_memory_vault", []);
+        writeUserLocalData(userId, "patient_memory_vault", [
+          {
+            ...body.vaultRecord,
+            user_id: userId,
+            category: body.category,
+            storage_folder: body.storageFolder,
+            patient_summary: body.patientSummary,
+            clinical_alerts: body.alerts,
+            file_url: body.vaultRecord.file_url ?? body.vaultRecord.document_url ?? null,
+            document_url: body.vaultRecord.document_url ?? null
+          },
+          ...existingVault.filter((record) => record.id !== body.vaultRecord.id)
+        ].slice(0, 100));
+      }
+      const meal = mealAnalysisFromVault(body);
+      if (!meal) return;
+
+      setAnalysisResult(meal);
+      const localMeal: MealLog = {
+        ...meal,
+        id: body.vaultRecord.id,
+        timestamp: body.vaultRecord.created_at || new Date().toISOString()
+      };
+      if (user?.isGuest && userId) {
         const nextMeals = [localMeal, ...readUserLocalData<MealLog[]>(userId, "meal_logs", [])].slice(0, 100);
         writeUserLocalData(userId, "meal_logs", nextMeals);
         setMealLogs(nextMeals);
-        return;
-      }
-      try {
-        const supabase = getSupabaseClient();
-        const authenticatedUserId = await requireAuthenticatedUser(supabase, session?.user.id);
-        const { data, error } = await supabase
-          .from("meal_logs")
-          .insert({
-            user_id: authenticatedUserId,
-            food_name: body.itemName,
-            calories: body.calories,
-            macros: { protein: body.protein, carbs: body.carbs, fats: body.fats }
-          })
-          .select("id, food_name, calories, macros, timestamp")
-          .single();
-        if (error) throw error;
-        const macros = data.macros as MealAnalysis;
-        setMealLogs((previous) => [{
-          id: data.id,
-          itemName: data.food_name,
-          calories: Number(data.calories),
-          protein: Number(macros.protein ?? 0),
-          carbs: Number(macros.carbs ?? 0),
-          fats: Number(macros.fats ?? 0),
-          timestamp: data.timestamp
-        }, ...previous]);
-      } catch (error: unknown) {
-        console.error("Meal analysis succeeded but saving the meal log failed.", error);
-        if (isNetworkError(error) && userId) {
-          const localMeal: MealLog = {
-            ...body,
-            id: crypto.randomUUID(),
-            timestamp: new Date().toISOString()
-          };
-          const nextMeals = [localMeal, ...readUserLocalData<MealLog[]>(userId, "meal_logs", [])].slice(0, 100);
-          writeUserLocalData(userId, "meal_logs", nextMeals);
-          setMealLogs(nextMeals);
-        } else {
-          setMealLoadError(error instanceof Error ? `Meal analyzed, but it could not be saved: ${error.message}` : "Meal analyzed, but it could not be saved.");
-        }
+      } else {
+        setMealLogs((previous) => [localMeal, ...previous.filter((entry) => entry.id !== localMeal.id)]);
       }
     } catch (error: unknown) {
       console.error("Meal Snap analysis failed.", error);
@@ -261,7 +289,7 @@ export function MealSnapTabView() {
     } finally {
       setIsAnalyzing(false);
     }
-  }, [session?.user.id, user?.isGuest, userId]);
+  }, [session, user, userId]);
 
   const handleMealFile = useCallback((file: File) => {
     void analyzeMealImage(readMealImage(file));
@@ -308,6 +336,7 @@ export function MealSnapTabView() {
   const handleRetake = () => {
     setCapturedImage(null);
     setAnalysisResult(null);
+    setVaultResult(null);
     setAnalysisError(null);
   };
 
@@ -361,11 +390,11 @@ export function MealSnapTabView() {
             <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-slate-950/45 text-center text-white">
               {isAnalyzing ? (
                 <RefreshCw className="h-8 w-8 animate-spin" />
-              ) : analysisResult ? (
+              ) : vaultResult ? (
                 <CheckCircle2 className="h-8 w-8 text-emerald-300" />
               ) : null}
               <p className="text-xl font-black">
-                {isAnalyzing ? "Analyzing meal..." : analysisResult ? "Analysis complete" : "Meal photo"}
+                {isAnalyzing ? "Analyzing document..." : vaultResult ? "Analysis complete" : "Meal photo"}
               </p>
             </div>
             <button
@@ -427,6 +456,19 @@ export function MealSnapTabView() {
             ))}
           </div>
           <p className="text-xs text-[#537783]">Nutrition values are estimates and may vary by ingredients and portion size.</p>
+        </section>
+      )}
+
+      {vaultResult && (
+        <section aria-live="polite" className="space-y-3 rounded-3xl border border-[#BDE5D2] bg-[#F0FBF5] p-6 dark:border-emerald-900 dark:bg-emerald-950/30">
+          <div>
+            <p className="text-xs font-extrabold uppercase tracking-wider text-emerald-700 dark:text-emerald-300">Extracted by Healthysis Agent</p>
+            <h2 className="mt-1 text-xl font-black">{vaultResult.vaultRecord.title} saved to {vaultResult.storageFolder} folder</h2>
+          </div>
+          <p className="text-sm leading-6 text-[#315D4D] dark:text-emerald-100">{vaultResult.patientSummary}</p>
+          {vaultResult.alerts.map((alert, index) => (
+            <p className="rounded-xl bg-amber-50 p-3 text-sm text-amber-900 dark:bg-amber-950/40 dark:text-amber-100" key={`${index}-${alert}`}>{alert}</p>
+          ))}
         </section>
       )}
 

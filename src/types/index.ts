@@ -195,6 +195,7 @@ export interface HealthResumeData {
     temperature: string;
     temperatureStatus?: string;
   };
+  reportMetrics?: Record<string, string>;
 
   // Important Info
   importantInfo: {

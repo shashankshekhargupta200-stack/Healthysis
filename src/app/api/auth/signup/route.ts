@@ -1,88 +1,162 @@
-import { NextResponse } from "next/server";
-import { createSupabaseServerAuthClient, isRecord } from "@/lib/supabaseServer";
+import { NextResponse } from 'next/server';
+import { createClient } from '@supabase/supabase-js';
 
-export async function POST(request: Request) {
+export async function POST(req: Request) {
   try {
-    let body: unknown;
+    let body: any = {};
     try {
-      body = await request.json();
+      const text = await req.text();
+      body = text ? JSON.parse(text) : {};
     } catch {
-      return NextResponse.json({ success: false, error: "Request body must be valid JSON." }, { status: 400 });
+      return NextResponse.json(
+        { success: false, error: 'Malformed or empty request payload.' },
+        { status: 400 }
+      );
     }
 
-    if (
-      !isRecord(body)
-      || typeof body.name !== "string"
-      || typeof body.email !== "string"
-      || typeof body.password !== "string"
-      || (body.phone !== undefined && body.phone !== null && typeof body.phone !== "string")
-    ) {
-      return NextResponse.json({ success: false, error: "Name, email, and password are required." }, { status: 400 });
+    // 1. Catch ALL possible field names sent by AuthContext.tsx
+    const rawIdentifier =
+      body.email ||
+      body.phone ||
+      body.emailOrPhone ||
+      body.identifier ||
+      body.contact ||
+      body.username ||
+      '';
+    const identifier = String(rawIdentifier).trim().toLowerCase();
+    const password = String(body.password || '').trim();
+    const name = String(body.name || body.fullName || body.full_name || 'Patient').trim();
+
+    if (!identifier || !password) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Please enter both an email/mobile number and password.',
+          message: 'Please enter both an email/mobile number and password.',
+        },
+        { status: 400 }
+      );
     }
 
-    const name = body.name.trim();
-    const email = body.email.trim().toLowerCase();
-    const password = body.password;
-    const phone = typeof body.phone === "string" && body.phone.trim() ? body.phone.trim() : null;
-    if (!name || name.length > 200 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || password.length < 8) {
-      return NextResponse.json({
-        success: false,
-        error: "Enter a valid name, email, and password of at least 8 characters."
-      }, { status: 400 });
+    if (password.length < 6) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Password must be at least 6 characters long.',
+          message: 'Password must be at least 6 characters long.',
+        },
+        { status: 400 }
+      );
     }
 
-    const supabase = createSupabaseServerAuthClient();
-    const { data, error } = await supabase.auth.signUp({
-      email,
-      password,
-      options: { data: { full_name: name, phone } }
-    });
-    if (error) {
-      return NextResponse.json({ success: false, error: error.message }, { status: 400 });
+    // 2. Normalize 10-digit Indian mobile numbers (+91 or 10 digits)
+    const digitsOnly = identifier.replace(/\D/g, '');
+    const isPhone =
+      !identifier.includes('@') && (digitsOnly.length === 10 || (digitsOnly.length === 12 && digitsOnly.startsWith('91')));
+    const cleanPhone = isPhone ? digitsOnly.slice(-10) : null;
+    const targetEmail = cleanPhone ? `${cleanPhone}@healthysis.app` : identifier;
+
+    // 3. Ensure valid Supabase Project API URL (auto-fix if dashboard link was set in .env.local)
+    let supabaseUrl = (process.env.NEXT_PUBLIC_SUPABASE_URL || '').trim();
+    if (!supabaseUrl || supabaseUrl.includes('supabase.com/dashboard')) {
+      supabaseUrl = 'https://clahmsglxaoquouciceg.supabase.co';
     }
-    if (!data.user) {
-      return NextResponse.json({
-        success: false,
-        error: "Supabase did not return a user after signup."
-      }, { status: 502 });
+    const supabaseAnonKey = (process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '').trim();
+
+    if (!supabaseAnonKey) {
+      return NextResponse.json(
+        { success: false, error: 'Supabase Anon Key is missing in .env.local' },
+        { status: 500 }
+      );
     }
 
-    let profileWarning: string | undefined;
-    if (data.session) {
-      const { error: profileError } = await supabase.from("profiles").upsert({
-        id: data.user.id,
-        full_name: name,
-        phone,
-        patient_id: phone
-      }, { onConflict: "id" });
-      if (profileError) {
-        console.error("Could not save the authenticated signup profile.", profileError.message);
-        profileWarning = "Your account was created, but your profile could not be saved.";
+    const supabase = createClient(supabaseUrl, supabaseAnonKey);
+
+    // 4. Check if user already exists via RPC (if created)
+    try {
+      const { data: exists } = await supabase.rpc('check_user_exists', {
+        lookup_email: targetEmail,
+      });
+      if (exists === true) {
+        return NextResponse.json(
+          {
+            success: false,
+            error: 'User already exists! Please go to Sign In.',
+            message: 'User already exists! Please go to Sign In.',
+          },
+          { status: 409 }
+        );
       }
+    } catch {
+      // Continue if RPC is not installed yet
     }
 
-    return NextResponse.json({
-      success: true,
-      requiresEmailConfirmation: !data.session,
-      user: {
-        id: data.user.id,
-        name,
-        phone,
-        email: phone ? null : email
+    // 5. Create user in Supabase Auth
+    const { data, error } = await supabase.auth.signUp({
+      email: targetEmail,
+      password: password,
+      options: {
+        data: {
+          full_name: name,
+          phone_number: cleanPhone,
+        },
       },
-      profileWarning,
-      session: data.session
-        ? {
-          access_token: data.session.access_token,
-          refresh_token: data.session.refresh_token
-        }
-        : null
-    }, { status: 200 });
-  } catch (error: unknown) {
-    console.error("Supabase signup route failed.", error);
-    return NextResponse.json({
-      success: false,
-      error: error instanceof Error ? error.message : "Account creation is temporarily unavailable."
-    }, { status: 502 });
+    });
+
+    if (error) {
+      console.error('Supabase signup error:', error.message);
+      const msg = error.message.toLowerCase();
+
+      if (msg.includes('already registered') || msg.includes('already exists')) {
+        return NextResponse.json(
+          {
+            success: false,
+            error: 'User already exists! Please sign in instead.',
+            message: 'User already exists! Please sign in instead.',
+          },
+          { status: 409 }
+        );
+      }
+
+      return NextResponse.json(
+        {
+          success: false,
+          error: error.message,
+          message: error.message,
+        },
+        { status: 400 }
+      );
+    }
+
+    // Supabase returns an empty identities array if the email already exists when confirmations are on
+    if (data?.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'User already exists! Please sign in instead.',
+          message: 'User already exists! Please sign in instead.',
+        },
+        { status: 409 }
+      );
+    }
+
+    return NextResponse.json(
+      {
+        success: true,
+        user: data.user,
+        session: data.session,
+      },
+      { status: 200 }
+    );
+  } catch (err: any) {
+    console.error('Unexpected signup crash:', err);
+    return NextResponse.json(
+      {
+        success: false,
+        error: err?.message || 'Server error processing signup.',
+        message: err?.message || 'Server error processing signup.',
+      },
+      { status: 500 }
+    );
   }
 }

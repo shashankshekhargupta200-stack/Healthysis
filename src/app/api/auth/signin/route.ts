@@ -1,85 +1,68 @@
-import { NextResponse } from "next/server";
-import { createSupabaseServerAuthClient, isRecord } from "@/lib/supabaseServer";
+import { NextResponse } from 'next/server';
+import { createClient } from '@supabase/supabase-js';
 
-export async function POST(request: Request) {
+export async function POST(req: Request) {
   try {
-    let body: unknown;
-    try {
-      body = await request.json();
-    } catch {
-      return NextResponse.json({ success: false, error: "Request body must be valid JSON." }, { status: 400 });
+    const body = await req.json().catch(() => ({}));
+    const rawIdentifier = String(body.identifier || body.email || body.phone || '').trim().toLowerCase();
+    const password = String(body.password || '').trim();
+
+    if (!rawIdentifier || !password) {
+      return NextResponse.json(
+        { success: false, error: 'Please enter both your email/mobile number and password.' },
+        { status: 400 }
+      );
     }
 
-    if (
-      !isRecord(body)
-      || typeof body.identifier !== "string"
-      || typeof body.password !== "string"
-      || !body.identifier.trim()
-      || !body.password
-    ) {
-      return NextResponse.json({
-        success: false,
-        error: "Email or phone and password are required."
-      }, { status: 400 });
-    }
+    const digits = rawIdentifier.replace(/\D/g, '');
+    const isPhone = !rawIdentifier.includes('@') && (digits.length === 10 || (digits.length === 12 && digits.startsWith('91')));
+    const clean10 = isPhone ? digits.slice(-10) : null;
+    const targetEmail = clean10 ? `91${clean10}@healthysis.app` : rawIdentifier;
 
-    const identifier = body.identifier.trim().toLowerCase();
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(identifier)) {
-      return NextResponse.json({ success: false, error: "Enter a valid email address." }, { status: 400 });
+    let supabaseUrl = (process.env.NEXT_PUBLIC_SUPABASE_URL || '').trim();
+    if (!supabaseUrl || supabaseUrl.includes('supabase.com/dashboard')) {
+      supabaseUrl = 'https://clahmsglxaoquouciceg.supabase.co';
     }
+    const supabaseAnonKey = (process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '').trim();
+    const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
-    const supabase = createSupabaseServerAuthClient();
-    const { data, error } = await supabase.auth.signInWithPassword({
-      email: identifier,
-      password: body.password
+    // 1. Check if user exists first
+    const { data: exists } = await supabase.rpc('check_user_exists', {
+      lookup_email: targetEmail,
     });
+
+    if (exists === false) {
+      return NextResponse.json(
+        { success: false, error: 'User does not exist. Please check your email/mobile number or create an account.' },
+        { status: 404 }
+      );
+    }
+
+    // 2. User exists -> verify password
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email: targetEmail,
+      password,
+    });
+
     if (error) {
-      return NextResponse.json({ success: false, error: error.message }, { status: 401 });
-    }
-    if (!data.session) {
-      return NextResponse.json({
-        success: false,
-        error: "Sign-in did not return an authenticated session."
-      }, { status: 502 });
+      return NextResponse.json(
+        { success: false, error: 'Wrong password. Please try again.' },
+        { status: 401 }
+      );
     }
 
-    const metadataName = data.user.user_metadata?.full_name;
-    const metadataPhone = data.user.user_metadata?.phone;
-    const name = typeof metadataName === "string" && metadataName.trim()
-      ? metadataName
-      : data.user.email?.split("@")[0] ?? "User";
-    const phone = typeof metadataPhone === "string" && metadataPhone.trim()
-      ? metadataPhone
-      : null;
-    const { error: profileError } = await supabase.from("profiles").upsert({
-      id: data.user.id,
-      full_name: name,
-      phone,
-      patient_id: phone
-    }, { onConflict: "id" });
-    if (profileError) {
-      console.error("Could not save the authenticated signin profile.", profileError.message);
-    }
-
-    return NextResponse.json({
-      success: true,
-      user: {
-        id: data.user.id,
-        name,
-        phone,
-        email: data.user.email?.endsWith("@healthysis.app") ? null : data.user.email
+    return NextResponse.json(
+      {
+        success: true,
+        user: data.user,
+        session: data.session,
       },
-      profileWarning: profileError ? "Signed in, but your profile could not be saved." : undefined,
-      session: {
-        access_token: data.session.access_token,
-        refresh_token: data.session.refresh_token
-      }
-    }, { status: 200 });
-  } catch (error: unknown) {
-    console.error("Supabase signin route failed.", error);
-    return NextResponse.json({
-      success: false,
-      error: error instanceof Error ? error.message : "Sign-in is temporarily unavailable."
-    }, { status: 502 });
+      { status: 200 }
+    );
+  } catch (err: any) {
+    return NextResponse.json(
+      { success: false, error: err?.message || 'Server error during sign in.' },
+      { status: 500 }
+    );
   }
 }

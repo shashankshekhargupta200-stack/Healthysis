@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import { useState, useEffect, type ReactNode } from "react";
 import { PulseProvider, usePulse } from "@/context/PulseContext";
 import { useAuth } from "@/context/AuthContext";
 import { LoginScreen } from "@/components/LoginScreen";
@@ -116,12 +116,12 @@ function MainApp() {
   );
 }
 
-function UserScopedPulseProvider({ children }: { children: React.ReactNode }) {
+function UserScopedPulseProvider({ children }: { children: ReactNode }) {
   const { user } = useAuth();
   return <PulseProvider key={user?.id ?? "anonymous"}>{children}</PulseProvider>;
 }
 
-export default function Home() {
+export default function HomePage() {
   return (
     <UserScopedPulseProvider>
       <MainApp />

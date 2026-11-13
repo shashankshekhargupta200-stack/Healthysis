@@ -52,16 +52,19 @@ export function LoginScreen() {
     try {
       if (mode === "signUp") {
         const verification = await signUp(name, identifier, password);
-        if (verification === false) return;
+        if (!verification) return;
+        // If email confirmation is still flagged by the client, bypass or inform cleanly
         if (verification === "email") {
-          setPendingEmailConfirmation(true);
-          setNotice("Check your email and confirm your address, then return here to sign in.");
-          return;
+          // If you turned off email confirmation in Supabase, sign them straight in:
+          const autoSignedIn = await signIn(identifier, password);
+          if (!autoSignedIn) return;
         }
       } else {
         const signedIn = await signIn(identifier, password);
         if (!signedIn) return;
       }
+
+      router.replace("/");
       router.replace("/");
     } catch (authError: unknown) {
       console.error(`Supabase ${mode === "signUp" ? "sign-up" : "sign-in"} failed.`, authError);

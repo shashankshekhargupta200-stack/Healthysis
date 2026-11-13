@@ -6,6 +6,8 @@ import { useAuth } from "@/context/AuthContext";
 import { getSupabaseClient, requireAuthenticatedUser } from "@/lib/supabase";
 import { isNetworkError, readUserLocalData, writeUserLocalData } from "@/lib/localUserData";
 import { createEmptyHealthResume } from "@/lib/healthResumeDefaults";
+import { HealthfolioVaultGallery } from "@/components/HealthfolioVaultGallery";
+import { reportExtractedEventName, type ReportExtractedDetail } from "@/lib/reportExtraction";
 import {
   HealthResumeData,
   HealthDiagnosisItem,
@@ -67,6 +69,136 @@ function stringValue(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
+function reportText(value: unknown): string {
+  return typeof value === "number" ? String(value) : stringValue(value);
+}
+
+function reportNumber(value: unknown): string {
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value !== "string") return "";
+  return value.replace(/,/g, "").match(/-?\d+(?:\.\d+)?/)?.[0] ?? "";
+}
+
+function isRecordArray(value: unknown): Array<Record<string, unknown>> {
+  return Array.isArray(value) ? value.filter(isRecord) : [];
+}
+
+function hydrateResumeFromVault(resume: HealthResumeData, records: unknown[]): HealthResumeData {
+  let next = resume;
+  for (const record of records.filter(isRecord)) {
+    const extracted = isRecord(record.extracted_data) ? record.extracted_data : {};
+    const title = stringValue(record.title) || "Health report";
+    const date = typeof record.created_at === "string" ? record.created_at.slice(0, 10) : "";
+    const folder = stringValue(record.storage_folder);
+    if (folder === "lab-reports") {
+      const reportMetricNames: Record<string, string> = {
+        systolic_bp: "Systolic BP",
+        diastolic_bp: "Diastolic BP",
+        blood_glucose: "Blood glucose",
+        heart_rate: "Heart rate",
+        hba1c: "HbA1c",
+        total_cholesterol: "Total cholesterol",
+        ldl: "LDL",
+        hdl: "HDL",
+        triglycerides: "Triglycerides",
+        vitamin_d: "Vitamin D",
+        vitamin_b12: "Vitamin B12",
+        tsh: "TSH",
+        hemoglobin: "Hemoglobin"
+      };
+      const markers = isRecordArray(extracted.biomarkers);
+      const reportMetrics = { ...next.reportMetrics };
+      for (const [key, label] of Object.entries(reportMetricNames)) {
+        const directValue = extracted[key];
+        const marker = markers.find((item) => stringValue(item.name).toLowerCase().includes(label.toLowerCase()));
+        const value = directValue ?? marker?.value;
+        if (typeof value === "number" || typeof value === "string") {
+          reportMetrics[label] = `${value}${marker?.unit ? ` ${reportText(marker.unit)}` : ""}`;
+        }
+      }
+      const systolic = reportNumber(extracted.systolic_bp);
+      const diastolic = reportNumber(extracted.diastolic_bp);
+      const heartRate = reportNumber(extracted.heart_rate);
+      const metrics = [
+        ["Blood glucose", extracted.blood_glucose],
+        ["HbA1c", extracted.hba1c],
+        ["Total cholesterol", extracted.total_cholesterol],
+        ["LDL", extracted.ldl],
+        ["HDL", extracted.hdl],
+        ["Triglycerides", extracted.triglycerides],
+        ["Vitamin D", extracted.vitamin_d],
+        ["Vitamin B12", extracted.vitamin_b12],
+        ["TSH", extracted.tsh],
+        ["Hemoglobin", extracted.hemoglobin]
+      ].filter((entry): entry is [string, string | number] => typeof entry[1] === "string" || typeof entry[1] === "number")
+        .map(([name, value]) => `${name}: ${value}`);
+      const findings = isRecordArray(extracted.biomarkers).map((marker) =>
+        `${reportText(marker.name)}: ${reportText(marker.value)} ${reportText(marker.unit)}${marker.reference_range ? ` (ref ${reportText(marker.reference_range)})` : ""}${marker.status ? ` · ${reportText(marker.status)}` : ""}`
+      );
+      const flags = isRecordArray(extracted.status_flags).map((flag) =>
+        `${reportText(flag.biomarker)}: ${reportText(flag.value)} · ${reportText(flag.status)}`
+      );
+      const result = [
+        ...((systolic && diastolic) ? [`Blood pressure: ${systolic}/${diastolic} mmHg`] : []),
+        ...(heartRate ? [`Heart rate: ${heartRate} bpm`] : []),
+        ...metrics,
+        ...findings,
+        ...flags,
+        stringValue(record.patient_summary)
+      ].filter(Boolean).join("\n");
+      next = {
+        ...next,
+        vitals: {
+          ...next.vitals,
+          ...(systolic && diastolic ? { bloodPressure: `${systolic}/${diastolic}` } : {}),
+          ...(heartRate ? { heartRate } : {})
+        },
+        reportMetrics,
+        testReports: [
+          {
+            id: stringValue(record.id) || `vault-${title}-${date}`,
+            date,
+            testName: title,
+            result,
+            ...(typeof record.document_url === "string" ? { file: record.document_url } : {})
+          },
+          ...next.testReports.filter((item) => item.id !== record.id && !(item.testName === title && item.date === date))
+        ]
+      };
+    } else if (folder === "prescriptions") {
+      const medications = isRecordArray(extracted.medications).map((medication) => ({
+        id: next.medications.find((existing) =>
+          existing.medicine.toLowerCase() === stringValue(medication.name).toLowerCase()
+        )?.id ?? crypto.randomUUID(),
+        medicine: stringValue(medication.name) || title,
+        dose: stringValue(medication.dosage) || stringValue(medication.dose),
+        frequency: stringValue(medication.frequency),
+        purpose: stringValue(record.patient_summary)
+      })).filter((medication) => medication.medicine.trim());
+      next = {
+        ...next,
+        medications: [
+          ...medications,
+          ...next.medications.filter((item) => !medications.some((medication) =>
+            medication.medicine.toLowerCase() === item.medicine.toLowerCase()
+          ))
+        ],
+        testReports: [
+          {
+            id: stringValue(record.id) || `vault-${title}-${date}`,
+            date,
+            testName: title,
+            result: stringValue(record.patient_summary),
+            ...(typeof record.document_url === "string" ? { file: record.document_url } : {})
+          },
+          ...next.testReports.filter((item) => item.id !== record.id && !(item.testName === title && item.date === date))
+        ]
+      };
+    }
+  }
+  return next;
+}
+
 export function HealthResumeBuilderTabView() {
   const { healthResume, updateHealthResume, updateProfile } = usePulse();
   const { user, session } = useAuth();
@@ -98,7 +230,11 @@ export function HealthResumeBuilderTabView() {
       const restoreLocalResume = () => {
         if (!userId) return;
         const localResume = readUserLocalData<HealthResumeData | null>(userId, "healthfolio", null);
-        const nextResume = localResume ?? createEmptyHealthResume(user?.name ?? "", user?.phone ?? "");
+        const baseResume = localResume ?? createEmptyHealthResume(user?.name ?? "", user?.phone ?? "");
+        const nextResume = hydrateResumeFromVault(
+          baseResume,
+          readUserLocalData<unknown[]>(userId, "patient_memory_vault", [])
+        );
         setFormData(nextResume);
         updateHealthResume(nextResume);
         updateProfile({
@@ -121,31 +257,60 @@ export function HealthResumeBuilderTabView() {
         }
         const supabase = getSupabaseClient();
         const authenticatedUserId = await requireAuthenticatedUser(supabase, session?.user.id);
-        const [profileResult, historyResult] = await Promise.all([
+        const [profileResult, historyResult, vaultResult] = await Promise.all([
           supabase
             .from("profiles")
-            .select("id, full_name, phone, dob, blood_group, abha_id, details")
+            .select("id, full_name, phone, dob, blood_group, abha_id, details, blood_pressure_latest, heart_rate_latest")
             .eq("id", authenticatedUserId)
             .maybeSingle(),
           supabase
             .from("medical_history")
             .select("id, type, date, details")
+            .eq("user_id", authenticatedUserId),
+          supabase
+            .from("patient_memory_vault")
+            .select("id, category, storage_folder, title, extracted_data, patient_summary, document_url, created_at")
             .eq("user_id", authenticatedUserId)
+            .in("category", ["lab_report", "prescription"])
+            .order("created_at", { ascending: false })
+            .limit(50)
         ]);
         if (profileResult.error) throw profileResult.error;
         if (historyResult.error) throw historyResult.error;
+        if (vaultResult.error) {
+          console.warn("Could not load vault data into the Healthfolio form.", vaultResult.error.message);
+        }
 
         const profileDetails = isRecord(profileResult.data?.details) ? profileResult.data.details : {};
         const base = createEmptyHealthResume(user?.name ?? "", authenticatedUserId);
         const diagnoses: HealthResumeData["diagnoses"] = [];
         const medications: HealthResumeData["medications"] = [];
         const surgeries: HealthResumeData["surgeries"] = [];
+        const testReports: HealthResumeData["testReports"] = Array.isArray(profileDetails.testReports)
+          ? profileDetails.testReports.filter(isRecord).map((report, index) => ({
+            id: stringValue(report.id) || `saved-report-${index}`,
+            date: stringValue(report.date),
+            testName: stringValue(report.testName),
+            result: stringValue(report.result),
+            ...(typeof report.file === "string" ? { file: report.file } : {})
+          }))
+          : [];
 
         for (const rawRecord of historyResult.data ?? []) {
           if (!isRecord(rawRecord) || !isRecord(rawRecord.details)) continue;
           const record = rawRecord as unknown as MedicalHistoryRecord;
           const details = record.details;
           if (record.type === "diagnosis") {
+            if (details.report_summary === true) {
+              const extractedMetrics = isRecord(details.extracted_metrics) ? details.extracted_metrics : {};
+              testReports.push({
+                id: record.id,
+                date: record.date ?? "",
+                testName: stringValue(details.condition) || "Lab report",
+                result: stringValue(details.details) || JSON.stringify(extractedMetrics)
+              });
+              continue;
+            }
             diagnoses.push({
               id: record.id,
               date: record.date ?? "",
@@ -174,6 +339,9 @@ export function HealthResumeBuilderTabView() {
         const fullName = profileResult.data?.full_name || user?.name || "";
         const nextResume: HealthResumeData = {
           ...base,
+          reportMetrics: isRecord(profileDetails.reportMetrics)
+            ? Object.fromEntries(Object.entries(profileDetails.reportMetrics).filter((entry): entry is [string, string] => typeof entry[1] === "string"))
+            : base.reportMetrics,
           age: typeof profileDetails.age === "number" || typeof profileDetails.age === "string" ? profileDetails.age : "",
           gender: stringValue(profileDetails.gender),
           dob: profileResult.data?.dob ?? "",
@@ -191,22 +359,31 @@ export function HealthResumeBuilderTabView() {
           bmiCategory: stringValue(profileDetails.bmiCategory),
           diagnoses,
           medications,
-          surgeries
+          surgeries,
+          testReports,
+          vitals: {
+            ...base.vitals,
+            bloodPressure: profileResult.data?.blood_pressure_latest ?? base.vitals.bloodPressure,
+            heartRate: profileResult.data?.heart_rate_latest !== null && profileResult.data?.heart_rate_latest !== undefined
+              ? String(profileResult.data.heart_rate_latest)
+              : base.vitals.heartRate
+          }
         };
+        const hydratedResume = hydrateResumeFromVault(nextResume, vaultResult.data ?? []);
         if (active) {
-          setFormData(nextResume);
-          updateHealthResume(nextResume);
+          setFormData(hydratedResume);
+          updateHealthResume(hydratedResume);
           updateProfile({
             name: fullName,
             phone: profileResult.data?.phone ?? user?.phone ?? "",
             uniqueId: authenticatedUserId,
-            age: Number(nextResume.age) || 0,
-            dob: nextResume.dob,
-            gender: nextResume.gender,
-            height: nextResume.heightCm ? `${nextResume.heightCm} cm` : "",
-            weight: nextResume.weightKg ? `${nextResume.weightKg} kg` : "",
-            bmi: Number(nextResume.bmi) || undefined,
-            bmiCategory: nextResume.bmiCategory
+            age: Number(hydratedResume.age) || 0,
+            dob: hydratedResume.dob,
+            gender: hydratedResume.gender,
+            height: hydratedResume.heightCm ? `${hydratedResume.heightCm} cm` : "",
+            weight: hydratedResume.weightKg ? `${hydratedResume.weightKg} kg` : "",
+            bmi: Number(hydratedResume.bmi) || undefined,
+            bmiCategory: hydratedResume.bmiCategory
           });
         }
       } catch (error: unknown) {
@@ -226,6 +403,41 @@ export function HealthResumeBuilderTabView() {
       active = false;
     };
   }, [user?.name, user?.phone, user?.email, user?.isGuest, session?.user.id, userId, updateHealthResume, updateProfile]);
+
+  useEffect(() => {
+    const handleReportExtracted = (event: Event) => {
+      const { detail } = event as CustomEvent<ReportExtractedDetail>;
+      if (!detail?.title) return;
+      const recordId = detail.vaultRecord && typeof detail.vaultRecord.id === "string"
+        ? detail.vaultRecord.id
+        : `scan-${Date.now()}`;
+      const next = hydrateResumeFromVault(formData, [{
+        id: recordId,
+        category: detail.category ?? (isRecordArray(detail.extracted_data.medications).length > 0 ? "prescription" : "lab_report"),
+        storage_folder: detail.category === "prescription" || isRecordArray(detail.extracted_data.medications).length > 0
+          ? "prescriptions"
+          : "lab-reports",
+        title: detail.title,
+        extracted_data: {
+          ...detail.extracted_data,
+          status_flags: detail.status_flags
+        },
+        patient_summary: detail.patient_summary,
+        document_url: typeof detail.vaultRecord?.document_url === "string" ? detail.vaultRecord.document_url : null,
+        created_at: new Date().toISOString()
+      }]);
+      setFormData(next);
+      updateHealthResume(next);
+      if (userId) writeUserLocalData(userId, "healthfolio", next);
+      const isPrescription = detail.category === "prescription" || isRecordArray(detail.extracted_data.medications).length > 0;
+      setActiveFormSection(isPrescription ? "medications" : "personal");
+      setSaveMessage(isPrescription
+        ? "Prescription details auto-filled in Medications & Allergies. Review before saving."
+        : "Report readings and summary auto-filled in Personal & Vitals and Medical Events & Tests.");
+    };
+    window.addEventListener(reportExtractedEventName, handleReportExtracted);
+    return () => window.removeEventListener(reportExtractedEventName, handleReportExtracted);
+  }, [formData, updateHealthResume, userId]);
 
   // Compute 8-digit DOB passphrase
   const computePasscode = (): string => {
@@ -312,7 +524,7 @@ export function HealthResumeBuilderTabView() {
     handleFieldChange("diagnoses", list);
   };
 
-  const saveProfile = async () => {
+  const saveDossier = async () => {
     if (!userId) return;
     setIsSaving(true);
     setSaveError(null);
@@ -325,7 +537,9 @@ export function HealthResumeBuilderTabView() {
           phone: formData.phone || user.phone || "",
           patientId: userId
         };
-        writeUserLocalData(userId, "healthfolio", saved);
+        if (!writeUserLocalData(userId, "healthfolio", saved)) {
+          throw new Error("Could not save your dossier on this device.");
+        }
         setFormData(saved);
         updateHealthResume(saved);
         updateProfile({
@@ -340,20 +554,40 @@ export function HealthResumeBuilderTabView() {
           bmi: Number(saved.bmi) || undefined,
           bmiCategory: saved.bmiCategory
         });
-        setSaveMessage("Personal information saved on this device.");
+        setSaveMessage("Dossier saved on this device.");
         return;
       }
-      if (!session) throw new Error("A signed-in user is required to save your profile.");
+      if (!session) throw new Error("A signed-in user is required to save medical history.");
       const supabase = getSupabaseClient();
       const authenticatedUserId = await requireAuthenticatedUser(supabase, session.user.id);
-      const { error } = await supabase.from("profiles").upsert({
+      const savedName = formData.fullName.trim() || user?.name || "User";
+      const reportMetricValues = formData.reportMetrics ?? {};
+      const metricValue = (label: string) => {
+        const numeric = reportNumber(reportMetricValues[label]);
+        return numeric ? Number(numeric) : null;
+      };
+      const { error: profileError } = await supabase.from("profiles").upsert({
         id: authenticatedUserId,
-        full_name: formData.fullName.trim() || user?.name || "User",
+        full_name: savedName,
         phone: formData.phone || user?.phone || null,
         patient_id: formData.phone || user?.phone || null,
         dob: formData.dobRaw || (/^\d{4}-\d{2}-\d{2}$/.test(formData.dob) ? formData.dob : null),
         blood_group: formData.bloodGroup.trim() || null,
         abha_id: formData.abhaId?.trim() || null,
+        blood_pressure_latest: formData.vitals.bloodPressure || null,
+        heart_rate_latest: reportNumber(formData.vitals.heartRate)
+          ? Number(reportNumber(formData.vitals.heartRate))
+          : null,
+        blood_glucose_latest: metricValue("Blood glucose"),
+        hba1c_latest: metricValue("HbA1c"),
+        cholesterol_latest: metricValue("Total cholesterol"),
+        ldl_latest: metricValue("LDL"),
+        hdl_latest: metricValue("HDL"),
+        triglycerides_latest: metricValue("Triglycerides"),
+        vitamin_d_latest: metricValue("Vitamin D"),
+        vitamin_b12_latest: metricValue("Vitamin B12"),
+        thyroid_tsh_latest: metricValue("TSH"),
+        hemoglobin_latest: metricValue("Hemoglobin"),
         details: {
           age: formData.age,
           gender: formData.gender,
@@ -366,6 +600,7 @@ export function HealthResumeBuilderTabView() {
           abhaAddress: formData.abhaAddress,
           allergiesSummary: formData.allergiesSummary,
           vitals: formData.vitals,
+          reportMetrics: formData.reportMetrics ?? {},
           importantInfo: formData.importantInfo,
           allergiesList: formData.allergiesList,
           testReports: formData.testReports,
@@ -376,15 +611,59 @@ export function HealthResumeBuilderTabView() {
         },
         updated_at: new Date().toISOString()
       }, { onConflict: "id" });
-      if (error) throw error;
+      if (profileError) throw profileError;
 
-      const saved = {
-        ...formData,
-        fullName: formData.fullName.trim() || user?.name || "User",
-        phone: formData.phone || user?.phone || "",
-        patientId: authenticatedUserId
-      };
+      const { data: existingRows, error: existingError } = await supabase
+        .from("medical_history")
+        .select("id, type, details")
+        .eq("user_id", authenticatedUserId);
+      if (existingError) throw existingError;
+
+      const records = [
+        ...formData.diagnoses.filter((row) => row.condition.trim()).map((row) => ({
+          id: row.id,
+          user_id: authenticatedUserId,
+          type: "diagnosis" as const,
+          date: row.date || null,
+          details: { condition: row.condition, details: row.details, status: row.status }
+        })),
+        ...formData.medications.filter((row) => row.medicine.trim()).map((row) => ({
+          id: row.id,
+          user_id: authenticatedUserId,
+          type: "medication" as const,
+          date: null,
+          details: { medicine: row.medicine, dose: row.dose, frequency: row.frequency, purpose: row.purpose }
+        })),
+        ...formData.surgeries.filter((row) => row.procedure.trim()).map((row) => ({
+          id: row.id,
+          user_id: authenticatedUserId,
+          type: "surgery" as const,
+          date: row.date || null,
+          details: { procedure: row.procedure, details: row.details }
+        }))
+      ];
+      if (records.length > 0) {
+        const { error } = await supabase.from("medical_history").upsert(records, { onConflict: "id" });
+        if (error) throw error;
+      }
+
+      const savedIds = new Set(records.map((record) => record.id));
+      const removedIds = (existingRows ?? [])
+        .filter((row) => !(row.type === "diagnosis" && isRecord(row.details) && row.details.report_summary === true))
+        .map((row) => row.id as string)
+        .filter((id) => !savedIds.has(id));
+      if (removedIds.length > 0) {
+        const { error } = await supabase
+          .from("medical_history")
+          .delete()
+          .eq("user_id", authenticatedUserId)
+          .in("id", removedIds);
+        if (error) throw error;
+      }
+
+      const saved = { ...formData, fullName: savedName, patientId: authenticatedUserId };
       setFormData(saved);
+      writeUserLocalData(userId, "healthfolio", saved);
       updateHealthResume(saved);
       updateProfile({
         name: saved.fullName,
@@ -398,103 +677,18 @@ export function HealthResumeBuilderTabView() {
         bmi: Number(saved.bmi) || undefined,
         bmiCategory: saved.bmiCategory
       });
-      setSaveMessage("Personal information saved.");
+      setSaveMessage("Personal and clinical dossier saved.");
     } catch (error: unknown) {
-      console.error("Could not save the user's profile.", error);
+      console.error("Could not save the user's Healthfolio dossier.", error);
       if (isNetworkError(error)) {
-        const saved = {
-          ...formData,
-          fullName: formData.fullName.trim() || user?.name || "User",
-          phone: formData.phone || user?.phone || "",
-          patientId: userId
-        };
-        writeUserLocalData(userId, "healthfolio", saved);
-        setFormData(saved);
-        updateHealthResume(saved);
-        updateProfile({
-          name: saved.fullName,
-          phone: saved.phone,
-          uniqueId: userId,
-          age: Number(saved.age) || 0,
-          dob: saved.dob,
-          gender: saved.gender,
-          height: saved.heightCm ? `${saved.heightCm} cm` : "",
-          weight: saved.weightKg ? `${saved.weightKg} kg` : "",
-          bmi: Number(saved.bmi) || undefined,
-          bmiCategory: saved.bmiCategory
-        });
-        setSaveMessage("Supabase is unavailable. Personal information was saved on this device.");
+        if (writeUserLocalData(userId, "healthfolio", formData)) {
+          updateHealthResume(formData);
+          setSaveMessage("Network unavailable. Dossier saved on this device.");
+        } else {
+          setSaveError("Network unavailable, and the dossier could not be saved on this device.");
+        }
       } else {
-        setSaveError(error instanceof Error ? error.message : "Could not save your profile.");
-      }
-    } finally {
-      setIsSaving(false);
-    }
-  };
-
-  const saveMedicalHistory = async (
-    type: MedicalHistoryType,
-    rows: Array<{ id: string; date: string; details: Record<string, unknown> }>
-  ) => {
-    if (!userId) return;
-    setIsSaving(true);
-    setSaveError(null);
-    setSaveMessage(null);
-    try {
-      if (user?.isGuest) {
-        writeUserLocalData(userId, "healthfolio", formData);
-        updateHealthResume(formData);
-        setSaveMessage(type === "diagnosis" ? "Diagnoses saved on this device." : "Medications saved on this device.");
-        return;
-      }
-      if (!session) throw new Error("A signed-in user is required to save medical history.");
-      const supabase = getSupabaseClient();
-      const authenticatedUserId = await requireAuthenticatedUser(supabase, session.user.id);
-      const { data: existingRows, error: existingError } = await supabase
-        .from("medical_history")
-        .select("id")
-        .eq("user_id", authenticatedUserId)
-        .eq("type", type);
-      if (existingError) throw existingError;
-
-      const records = rows.map((row) => ({
-        id: row.id,
-        user_id: authenticatedUserId,
-        type,
-        date: row.date || null,
-        details: row.details
-      }));
-      if (records.length > 0) {
-        const { error } = await supabase.from("medical_history").upsert(records, { onConflict: "id" });
-        if (error) throw error;
-      }
-
-      const savedIds = new Set(records.map((record) => record.id));
-      const removedIds = (existingRows ?? [])
-        .map((row) => row.id as string)
-        .filter((id) => !savedIds.has(id));
-      if (removedIds.length > 0) {
-        const { error } = await supabase
-          .from("medical_history")
-          .delete()
-          .eq("user_id", authenticatedUserId)
-          .eq("type", type)
-          .in("id", removedIds);
-        if (error) throw error;
-      }
-
-      updateHealthResume(formData);
-      setSaveMessage(type === "diagnosis" ? "Diagnoses saved." : "Medications saved.");
-    } catch (error: unknown) {
-      console.error(`Could not save the user's ${type} records.`, error);
-      if (isNetworkError(error)) {
-        writeUserLocalData(userId, "healthfolio", formData);
-        updateHealthResume(formData);
-        setSaveMessage(type === "diagnosis"
-          ? "Supabase is unavailable. Diagnoses were saved on this device."
-          : "Supabase is unavailable. Medications were saved on this device.");
-      } else {
-        setSaveError(error instanceof Error ? error.message : `Could not save ${type} records.`);
+        setSaveError(error instanceof Error ? error.message : "Could not save your dossier.");
       }
     } finally {
       setIsSaving(false);
@@ -717,15 +911,23 @@ export function HealthResumeBuilderTabView() {
               📄
             </span>
             <h1 className="text-2xl sm:text-3xl font-black text-[#123F55] dark:text-slate-100 tracking-tight">
-              Healthfolio • Health Resume Builder
+              Personal &amp; Clinical Dossier
             </h1>
           </div>
           <p className="text-xs sm:text-sm font-semibold text-[#537783] dark:text-slate-400">
-            Build, personalize, and export your sovereign 2-page medical resume with DOB passphrase encryption.
+            Review your personal and clinical information, then save the complete dossier once.
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-3 w-full md:w-auto">
+          <button
+            type="button"
+            onClick={() => void saveDossier()}
+            disabled={isSaving}
+            className="flex-1 sm:flex-none rounded-2xl bg-healthysis-signature px-5 py-3.5 text-sm font-black text-white shadow-lg shadow-[#04939D]/25 disabled:opacity-50"
+          >
+            {isSaving ? "Saving Dossier…" : "Save Dossier"}
+          </button>
           {/* Preview Layout Button */}
           <button
             type="button"
@@ -969,6 +1171,30 @@ export function HealthResumeBuilderTabView() {
               </div>
             </div>
 
+            {Object.keys(formData.reportMetrics ?? {}).length > 0 && (
+              <div className="space-y-3 rounded-2xl border border-teal-100 bg-teal-50/60 p-4 dark:border-teal-900 dark:bg-teal-950/20">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h4 className="text-sm font-black text-[#123F55] dark:text-slate-100">Auto-filled report biomarkers</h4>
+                  <span className="rounded-full bg-teal-100 px-3 py-1 text-[10px] font-bold text-teal-800">From latest scan · review before saving</span>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-3">
+                  {Object.entries(formData.reportMetrics ?? {}).map(([label, value]) => (
+                    <label className="grid gap-1 text-[11px] font-bold text-[#537783]" key={label}>
+                      {label}
+                      <input
+                        className="w-full rounded-xl border border-[#DCEAEC] bg-white px-3 py-2.5 text-xs font-semibold text-[#123F55] dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+                        onChange={(event) => handleFieldChange("reportMetrics", {
+                          ...(formData.reportMetrics ?? {}),
+                          [label]: event.target.value
+                        })}
+                        value={value}
+                      />
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div className="pt-4 border-t border-[#DCEAEC] dark:border-slate-800">
               <h4 className="text-sm font-black text-[#123F55] dark:text-slate-100 mb-3">
                 Latest Key Vitals (Key Health Indicators)
@@ -1028,16 +1254,6 @@ export function HealthResumeBuilderTabView() {
               </div>
             </div>
 
-            <div className="flex justify-end">
-              <button
-                type="button"
-                onClick={() => void saveProfile()}
-                disabled={isSaving}
-                className="rounded-xl bg-healthysis-signature px-5 py-3 text-sm font-bold text-white disabled:opacity-50"
-              >
-                {isSaving ? "Saving…" : "Save Personal Info"}
-              </button>
-            </div>
           </div>
         )}
 
@@ -1059,18 +1275,6 @@ export function HealthResumeBuilderTabView() {
                 >
                   <Plus className="w-3.5 h-3.5" />
                   <span>Add Diagnosis</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void saveMedicalHistory("diagnosis", formData.diagnoses.filter((row) => row.condition.trim()).map((row) => ({
-                    id: row.id,
-                    date: row.date,
-                    details: { condition: row.condition, details: row.details, status: row.status }
-                  })))}
-                  disabled={isSaving}
-                  className="rounded-xl bg-healthysis-signature px-3.5 py-1.5 text-xs font-bold text-white disabled:opacity-50"
-                >
-                  {isSaving ? "Saving…" : "Save Diagnoses"}
                 </button>
               </div>
             </div>
@@ -1164,23 +1368,6 @@ export function HealthResumeBuilderTabView() {
                   >
                     <Plus className="w-3.5 h-3.5" />
                     <span>Add Medication</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void saveMedicalHistory("medication", formData.medications.filter((row) => row.medicine.trim()).map((row) => ({
-                      id: row.id,
-                      date: "",
-                      details: {
-                        medicine: row.medicine,
-                        dose: row.dose,
-                        frequency: row.frequency,
-                        purpose: row.purpose
-                      }
-                    })))}
-                    disabled={isSaving}
-                    className="rounded-xl bg-healthysis-signature px-3 py-1 text-xs font-bold text-white disabled:opacity-50"
-                  >
-                    {isSaving ? "Saving…" : "Save Medications"}
                   </button>
                 </div>
               </div>
@@ -1558,6 +1745,8 @@ export function HealthResumeBuilderTabView() {
           </div>
         )}
       </section>
+
+      <HealthfolioVaultGallery />
 
       {/* ============================================================ */}
       {/* 4. PASSPHRASE DECRYPTION MODAL BARRIER                       */}
