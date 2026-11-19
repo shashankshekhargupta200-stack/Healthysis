@@ -6,28 +6,14 @@ import {
   Stethoscope,
   Search,
   Star,
-  ChevronDown,
-  ChevronUp,
   MapPin,
-  Clock,
-  CheckCircle2,
-  ShieldCheck,
   MessageSquare,
   Lock,
   Building2,
   GraduationCap,
   Sparkles,
   X,
-  Calendar,
-  AlertCircle,
   Phone,
-  Video,
-  Zap,
-  Mic,
-  MicOff,
-  Send,
-  Volume2,
-  PhoneOff
 } from "lucide-react";
 import { DoctorProfile } from "@/types";
 import { InfiniteDoctorCarousel } from "@/components/InfiniteDoctorCarousel";
@@ -40,17 +26,6 @@ export function FindDoctorsTabView() {
   const [selectedDoctorForModal, setSelectedDoctorForModal] = useState<DoctorProfile | null>(null);
   const [isPersonalConsultFilter, setIsPersonalConsultFilter] = useState(false);
   const [isPrivateHeroModalOpen, setIsPrivateHeroModalOpen] = useState(false);
-  const [commsMode, setCommsMode] = useState<"audio" | "chat" | "video" | null>(null);
-  const [commsInputText, setCommsInputText] = useState("");
-  const [chatMessages, setChatMessages] = useState<Array<{ sender: string; text: string; time: string }>>([
-    {
-      sender: "doctor",
-      text: "Namaste! I've reviewed your metabolic telemetry and glycemic profile. How can I assist you with your hormonal health today?",
-      time: "Just now"
-    }
-  ]);
-  const [isBookingSuccess, setIsBookingSuccess] = useState(false);
-  const [bookingConfirmedDoctor, setBookingConfirmedDoctor] = useState<DoctorProfile | null>(null);
 
   const specialties = [
     "All",
@@ -58,7 +33,9 @@ export function FindDoctorsTabView() {
     "Endocrinology",
     "Diabetology",
     "Psychiatry",
-    "General Medicine"
+    "General Medicine",
+    "Cardiology",
+    "Surgery"
   ];
 
   // Tag matcher for Personal / Private Issues (Psychiatrists, Gynecologists specializing in Endometriosis/PCOS)
@@ -69,6 +46,7 @@ export function FindDoctorsTabView() {
     return (
       s.includes("psychiatry") ||
       s.includes("gynecology") ||
+      (doc.subspecialty || "").toLowerCase().includes("pcos") ||
       a.includes("pcos") ||
       a.includes("endometriosis") ||
       c.includes("pcos") ||
@@ -76,18 +54,26 @@ export function FindDoctorsTabView() {
     );
   };
 
+  const normalizedSearch = searchQuery.trim().toLowerCase();
   const filteredDoctors = doctorsList.filter((doc) => {
     if (isPersonalConsultFilter && !isPersonalDoctor(doc)) {
       return false;
     }
+    const specialtiesToSearch = `${doc.specialty} ${doc.subspecialty || ""}`.toLowerCase();
     const matchesSpecialty =
       selectedSpecialty === "All" ||
-      doc.specialty.toLowerCase().includes(selectedSpecialty.toLowerCase());
+      specialtiesToSearch.includes(selectedSpecialty.toLowerCase());
+    const searchableDetails = [
+      doc.name,
+      doc.specialty,
+      doc.subspecialty,
+      doc.credentials,
+      doc.city,
+      doc.clinicAddress,
+      ...(doc.hospitals ?? [])
+    ].filter(Boolean).join(" ").toLowerCase();
     const matchesSearch =
-      doc.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      doc.specialty.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      doc.city.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      (doc.credentials && doc.credentials.toLowerCase().includes(searchQuery.toLowerCase()));
+      !normalizedSearch || searchableDetails.includes(normalizedSearch);
     return matchesSpecialty && matchesSearch;
   });
 
@@ -102,41 +88,6 @@ export function FindDoctorsTabView() {
 
   const handleOpenDoctorProfile = (doctor: DoctorProfile) => {
     setSelectedDoctorForModal(doctor);
-    setCommsMode(null);
-    setIsBookingSuccess(false);
-  };
-
-  const handleSendMessage = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!commsInputText.trim()) return;
-    const newMsg = {
-      sender: "patient",
-      text: commsInputText.trim(),
-      time: "Just now"
-    };
-    setChatMessages(prev => [...prev, newMsg]);
-    setCommsInputText("");
-
-    // Simulated doctor response
-    setTimeout(() => {
-      setChatMessages(prev => [
-        ...prev,
-        {
-          sender: "doctor",
-          text: "I note this in your clinical record. Let's maintain the low-glycemic fiber sequencing and continue inositol at current dosage.",
-          time: "Just now"
-        }
-      ]);
-    }, 1200);
-  };
-
-  const handleBookFromModal = (doctor: DoctorProfile) => {
-    setBookingConfirmedDoctor(doctor);
-    setIsBookingSuccess(true);
-    setTimeout(() => {
-      setIsBookingSuccess(false);
-      setSelectedDoctorForModal(null);
-    }, 2200);
   };
 
   return (
@@ -158,8 +109,7 @@ export function FindDoctorsTabView() {
               Clinical Directory &amp; Specialist Care
             </h1>
             <p className="text-teal-50 text-sm sm:text-base font-normal leading-relaxed">
-              Browse 30 verified clinical endocrinologists, gynecologists, diabetologists, and psychiatrists. 
-              Review clinical experience, patient reviews, and consultation fees.
+              Browse {doctorsList.length} clinical specialists in Prayagraj. Listings have not been independently verified; call the clinic to confirm details and availability.
             </p>
           </div>
           {/* MASSIVE DISTINCT PRIVATE CONSULTATION HERO BUTTON */}
@@ -212,7 +162,7 @@ export function FindDoctorsTabView() {
             className="px-4 py-2 rounded-xl bg-white/20 hover:bg-white/30 text-white font-extrabold text-xs transition-colors shrink-0 flex items-center justify-center gap-1.5"
           >
             <X className="w-3.5 h-3.5" />
-            <span>Show All 30 Doctors</span>
+            <span>Show All {doctorsList.length} Doctors</span>
           </button>
         </div>
       )}
@@ -228,7 +178,7 @@ export function FindDoctorsTabView() {
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search by doctor name, specialty, hospital or city (e.g. Aditi, AIIMS, Bengaluru)..."
+            placeholder="Search by name, specialty, qualification, hospital, address, or city (e.g. Prayagraj)..."
             className="w-full pl-12 pr-4 py-3.5 rounded-2xl border border-[#DCEAEC] dark:border-slate-800 focus:border-[#0EA6B7] focus:ring-2 focus:ring-[#0EA6B7]/20 text-[#123F55] dark:text-slate-100 font-medium text-sm placeholder-[#829AA3] dark:placeholder-slate-500 transition-all bg-white dark:bg-slate-950"
           />
         </div>
@@ -253,7 +203,7 @@ export function FindDoctorsTabView() {
       </div>
 
       {/* ============================================================ */}
-      {/* 4. EXPANDED DIRECTORY (30 DOCTORS LIST)                      */}
+      {/* 4. EXPANDED DIRECTORY                                         */}
       {/* ============================================================ */}
       <div className="space-y-4">
         <div className="flex items-center justify-between px-2">
@@ -294,9 +244,9 @@ export function FindDoctorsTabView() {
                       <span className="px-2.5 py-0.5 rounded-full text-[11px] font-extrabold bg-teal-50 dark:bg-teal-950/60 border border-teal-200 dark:border-teal-800 text-teal-800 dark:text-teal-300">
                         {doc.specialty}
                       </span>
-                      {doc.feeNumber && doc.feeNumber >= 1200 && (
-                        <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-purple-50 dark:bg-purple-950/60 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-800">
-                          Premium Specialist
+                      {doc.subspecialty && (
+                        <span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-0.5 text-[11px] font-bold text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
+                          {doc.subspecialty}
                         </span>
                       )}
                     </div>
@@ -305,28 +255,16 @@ export function FindDoctorsTabView() {
                       {doc.credentials}
                     </p>
 
-                    <div className="flex flex-wrap items-center gap-3 pt-1 text-xs text-slate-500 dark:text-slate-400 font-medium">
-                      <span className="flex items-center gap-1">
-                        <Clock className="w-3.5 h-3.5 text-slate-400 dark:text-slate-500" />
-                        <strong>{doc.experienceYears} Years</strong> Exp.
-                      </span>
-                      <span>•</span>
-                      <span className="flex items-center gap-1 text-teal-800 dark:text-teal-300 font-bold">
-                        <CheckCircle2 className="w-3.5 h-3.5 text-teal-600 dark:text-teal-400" />
-                        {doc.patientsCuredCount}
-                      </span>
-                      <span>•</span>
-                      <span className="flex items-center gap-1">
-                        <MapPin className="w-3.5 h-3.5 text-slate-400 dark:text-slate-500" />
-                        {doc.city}
-                      </span>
-                    </div>
+                    <p className="flex items-start gap-1.5 pt-1 text-xs font-medium text-slate-500 dark:text-slate-400">
+                      <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-400 dark:text-slate-500" />
+                      <span>{doc.clinicAddress || doc.city}</span>
+                    </p>
                   </div>
                 </div>
 
                 {/* Rating & Action Button */}
                 <div className="flex sm:flex-col items-center sm:items-end justify-between sm:justify-start gap-3 shrink-0 pt-2 sm:pt-0 border-t sm:border-t-0 border-slate-100 dark:border-slate-800">
-                  <div className="flex items-center gap-1.5">
+                  {doc.rating > 0 ? <div className="flex items-center gap-1.5">
                     <div className="flex text-amber-400">
                       {[...Array(5)].map((_, i) => (
                         <Star
@@ -341,12 +279,19 @@ export function FindDoctorsTabView() {
                     </div>
                     <span className="text-xs font-black text-slate-900 dark:text-slate-100">{doc.rating}</span>
                     <span className="text-[11px] text-slate-400 dark:text-slate-500">({doc.reviews.length} reviews)</span>
-                  </div>
+                  </div> : <span className="text-xs text-slate-500 dark:text-slate-400">No rating data</span>}
 
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-extrabold text-slate-900 dark:text-slate-100">
-                      {doc.consultationFee}
-                    </span>
+                  <div className="flex flex-wrap items-center justify-end gap-2">
+                    {doc.phone && (
+                      <a
+                        href={`tel:${doc.phone.replace(/[^\d+]/g, "")}`}
+                        onClick={(event) => event.stopPropagation()}
+                        className="inline-flex items-center gap-1.5 rounded-xl border border-teal-700 px-3 py-2 text-xs font-extrabold text-teal-800 hover:bg-teal-50 dark:text-teal-300 dark:hover:bg-teal-950/40"
+                      >
+                        <Phone className="h-3.5 w-3.5" />
+                        Call {doc.phone}
+                      </a>
+                    )}
                     <button
                       type="button"
                       onClick={(e) => {
@@ -361,7 +306,7 @@ export function FindDoctorsTabView() {
                 </div>
               </div>
 
-              {/* Sample Review Preview Snippet */}
+              {/* Only render review previews when review data exists. */}
               {doc.reviews.length > 0 && (
                 <div className="pt-2 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
                   <div className="flex items-center gap-2 truncate max-w-xl">
@@ -427,7 +372,9 @@ export function FindDoctorsTabView() {
                     <MapPin className="w-3.5 h-3.5 text-slate-400 dark:text-slate-500" />
                     <span>{selectedDoctorForModal.city}, India</span>
                     <span>•</span>
-                    <span className="text-emerald-700 dark:text-emerald-400 font-bold">Medical Council Verified</span>
+                    <span className={selectedDoctorForModal.verified ? "font-bold text-emerald-700 dark:text-emerald-400" : "font-medium text-amber-700 dark:text-amber-400"}>
+                      {selectedDoctorForModal.verified ? "Directory verified" : "Verification not independently confirmed"}
+                    </span>
                   </p>
                 </div>
               </div>
@@ -443,22 +390,22 @@ export function FindDoctorsTabView() {
 
             {/* Modal Body (Scrollable) */}
             <div className="p-6 overflow-y-auto space-y-6 flex-1 text-slate-800 dark:text-slate-200">
-              {/* STATS ROW: Experience, Patients Cured, Ongoing Treatments */}
+              {/* Only show numeric clinical data when it has been supplied. */}
               <div className="grid grid-cols-3 gap-3 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl p-4 text-center">
                 <div className="space-y-0.5">
                   <span className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider block">
                     Experience
                   </span>
                   <span className="text-lg sm:text-xl font-black text-slate-900 dark:text-slate-100">
-                    {selectedDoctorForModal.experienceYears} Years
+                    {selectedDoctorForModal.experienceYears > 0 ? `${selectedDoctorForModal.experienceYears} Years` : "Not listed"}
                   </span>
                 </div>
                 <div className="space-y-0.5 border-x border-slate-200 dark:border-slate-800">
                   <span className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider block">
-                    Patients Cured
+                    Patient Count
                   </span>
                   <span className="text-base sm:text-lg font-black text-teal-700 dark:text-teal-400">
-                    {selectedDoctorForModal.patientsCuredCount}
+                    {selectedDoctorForModal.patientsCuredCount === "Not listed" ? "Not listed" : selectedDoctorForModal.patientsCuredCount}
                   </span>
                 </div>
                 <div className="space-y-0.5">
@@ -466,223 +413,29 @@ export function FindDoctorsTabView() {
                     Active Care
                   </span>
                   <span className="text-base sm:text-lg font-black text-slate-900 dark:text-slate-100">
-                    {selectedDoctorForModal.ongoingTreatmentsCount || "75 Active Patients"}
+                    {selectedDoctorForModal.ongoingTreatmentsCount || "Not listed"}
                   </span>
                 </div>
               </div>
 
-              {/* ============================================================ */}
-              {/* CONNECT ACTION BAR (Directly below stats)                     */}
-              {/* 1. Audio Call (Green)                                        */}
-              {/* 2. Secure Chat (Blue)                                        */}
-              {/* 3. Video Consult (Purple)                                    */}
-              {/* ============================================================ */}
-              <div className="bg-gradient-to-r from-teal-50 via-slate-50 to-emerald-50 dark:from-slate-950 dark:via-slate-900 dark:to-slate-950 rounded-3xl p-5 border-2 border-teal-200/80 dark:border-teal-900/60 shadow-xs space-y-3">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <Zap className="w-4 h-4 text-teal-600 dark:text-teal-400" />
-                    <span className="text-xs font-black uppercase tracking-wider text-slate-900 dark:text-slate-100">
-                      Connect With Specialist
-                    </span>
-                  </div>
-                  <span className="text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
-                    Online Now
-                  </span>
-                </div>
-
-                <div className="grid grid-cols-3 gap-3">
-                  {/* 1. Audio Call (Green) */}
-                  <button
-                    type="button"
-                    onClick={() => setCommsMode("audio")}
-                    className="flex flex-col items-center justify-center p-3 rounded-2xl bg-white dark:bg-slate-900 hover:bg-emerald-50 dark:hover:bg-emerald-950/40 border border-slate-200 dark:border-slate-800 hover:border-emerald-300 dark:hover:border-emerald-700 transition-all group touch-target shadow-xs"
+              <div className="rounded-2xl border border-teal-200 bg-teal-50 p-4 dark:border-teal-900 dark:bg-teal-950/30">
+                <h4 className="text-xs font-black uppercase tracking-wider text-slate-900 dark:text-slate-100">
+                  Contact Clinic
+                </h4>
+                <p className="mt-2 flex items-start gap-2 text-sm text-slate-700 dark:text-slate-300">
+                  <MapPin className="mt-0.5 h-4 w-4 shrink-0 text-teal-700 dark:text-teal-400" />
+                  <span>{selectedDoctorForModal.clinicAddress || selectedDoctorForModal.city}</span>
+                </p>
+                {selectedDoctorForModal.phone && (
+                  <a
+                    className="mt-3 inline-flex items-center gap-2 rounded-xl bg-teal-700 px-4 py-2 text-sm font-bold text-white hover:bg-teal-800"
+                    href={`tel:${selectedDoctorForModal.phone.replace(/[^\d+]/g, "")}`}
                   >
-                    <div className="w-13 h-13 rounded-full bg-emerald-500 hover:bg-emerald-600 text-white flex items-center justify-center shadow-lg shadow-emerald-500/25 group-hover:scale-105 transition-transform mb-2">
-                      <Phone className="w-5 h-5 stroke-[2.3]" />
-                    </div>
-                    <span className="text-xs font-black text-slate-900 dark:text-slate-100 block">
-                      Audio Call
-                    </span>
-                    <span className="text-[10px] font-semibold text-emerald-700 dark:text-emerald-400">
-                      Free 1st Consult
-                    </span>
-                  </button>
-
-                  {/* 2. Secure Chat (Blue) */}
-                  <button
-                    type="button"
-                    onClick={() => setCommsMode("chat")}
-                    className="flex flex-col items-center justify-center p-3 rounded-2xl bg-white dark:bg-slate-900 hover:bg-blue-50 dark:hover:bg-blue-950/40 border border-slate-200 dark:border-slate-800 hover:border-blue-300 dark:hover:border-blue-700 transition-all group touch-target shadow-xs"
-                  >
-                    <div className="w-13 h-13 rounded-full bg-blue-600 hover:bg-blue-700 text-white flex items-center justify-center shadow-lg shadow-blue-600/25 group-hover:scale-105 transition-transform mb-2">
-                      <MessageSquare className="w-5 h-5 stroke-[2.3]" />
-                    </div>
-                    <span className="text-xs font-black text-slate-900 dark:text-slate-100 block">
-                      Secure Chat
-                    </span>
-                    <span className="text-[10px] font-semibold text-blue-700 dark:text-blue-400">
-                      DPDP Encrypted
-                    </span>
-                  </button>
-
-                  {/* 3. Video Consult (Purple) */}
-                  <button
-                    type="button"
-                    onClick={() => setCommsMode("video")}
-                    className="flex flex-col items-center justify-center p-3 rounded-2xl bg-white dark:bg-slate-900 hover:bg-purple-50 dark:hover:bg-purple-950/40 border border-slate-200 dark:border-slate-800 hover:border-purple-300 dark:hover:border-purple-700 transition-all group touch-target shadow-xs"
-                  >
-                    <div className="w-13 h-13 rounded-full bg-purple-600 hover:bg-purple-700 text-white flex items-center justify-center shadow-lg shadow-purple-600/25 group-hover:scale-105 transition-transform mb-2">
-                      <Video className="w-5 h-5 stroke-[2.3]" />
-                    </div>
-                    <span className="text-xs font-black text-slate-900 dark:text-slate-100 block">
-                      Video Consult
-                    </span>
-                    <span className="text-[10px] font-semibold text-purple-700 dark:text-purple-400">
-                      HD Tele-Room
-                    </span>
-                  </button>
-                </div>
+                    <Phone className="h-4 w-4" />
+                    Call {selectedDoctorForModal.phone} to ask about booking
+                  </a>
+                )}
               </div>
-
-              {/* SIMULATED ACTIVE COMMS OVERLAY */}
-              {commsMode === "audio" && (
-                <div className="p-5 rounded-2xl bg-slate-900 text-white space-y-4 animate-in fade-in duration-150">
-                  <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-                    <div className="flex items-center gap-2 text-xs font-bold text-emerald-400">
-                      <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-                      <span>Encrypted Tele-Consult Call • 00:38</span>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setCommsMode(null)}
-                      className="text-xs text-slate-400 hover:text-white"
-                    >
-                      Minimize
-                    </button>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      <div className="w-12 h-12 rounded-full bg-emerald-500 flex items-center justify-center text-white font-black text-lg animate-pulse">
-                        {selectedDoctorForModal.avatarInitials}
-                      </div>
-                      <div>
-                        <span className="font-extrabold text-sm block">{selectedDoctorForModal.name}</span>
-                        <span className="text-xs text-emerald-300">Speaking with patient...</span>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setCommsMode(null)}
-                        className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-xs flex items-center gap-1.5 touch-target"
-                      >
-                        <PhoneOff className="w-4 h-4" />
-                        <span>End Call</span>
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {commsMode === "chat" && (
-                <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 space-y-3 animate-in fade-in duration-150">
-                  <div className="flex items-center justify-between pb-2 border-b border-slate-200 dark:border-slate-800">
-                    <div className="flex items-center gap-2">
-                      <div className="w-2 h-2 rounded-full bg-blue-500" />
-                      <span className="font-extrabold text-xs text-slate-900 dark:text-slate-100">
-                        Secure DPDP Consultation Chat with {selectedDoctorForModal.name}
-                      </span>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setCommsMode(null)}
-                      className="text-xs text-slate-400 dark:text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
-                    >
-                      Close
-                    </button>
-                  </div>
-
-                  <div className="max-h-48 overflow-y-auto space-y-2 text-xs">
-                    {chatMessages.map((msg, i) => (
-                      <div
-                        key={i}
-                        className={`p-3 rounded-2xl max-w-[85%] leading-relaxed ${
-                          msg.sender === "doctor"
-                            ? "bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-800 dark:text-slate-200"
-                            : "ml-auto bg-teal-600 text-white"
-                        }`}
-                      >
-                        <span className="font-bold block text-[10px] opacity-75 mb-0.5">
-                          {msg.sender === "doctor" ? selectedDoctorForModal.name : "You"}
-                        </span>
-                        <span>{msg.text}</span>
-                      </div>
-                    ))}
-                  </div>
-
-                  <form onSubmit={handleSendMessage} className="flex gap-2 pt-1">
-                    <input
-                      type="text"
-                      value={commsInputText}
-                      onChange={(e) => setCommsInputText(e.target.value)}
-                      placeholder="Type a clinical query (e.g., dosage, food advice)..."
-                      className="flex-1 px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 focus:border-teal-500 text-xs text-slate-900 dark:text-slate-100 bg-white dark:bg-slate-900"
-                    />
-                    <button
-                      type="submit"
-                      className="px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs flex items-center gap-1"
-                    >
-                      <Send className="w-3.5 h-3.5" />
-                      <span>Send</span>
-                    </button>
-                  </form>
-                </div>
-              )}
-
-              {commsMode === "video" && (
-                <div className="p-4 rounded-2xl bg-slate-950 text-white space-y-3 animate-in fade-in duration-150">
-                  <div className="flex items-center justify-between pb-2 border-b border-slate-800 text-xs">
-                    <span className="font-bold text-purple-400 flex items-center gap-2">
-                      <span className="w-2 h-2 rounded-full bg-purple-400 animate-ping" />
-                      Video Room #PS-742 Connected
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setCommsMode(null)}
-                      className="text-slate-400 hover:text-white"
-                    >
-                      Exit Room
-                    </button>
-                  </div>
-                  <div className="aspect-video bg-slate-900 rounded-xl relative flex items-center justify-center border border-slate-800">
-                    <div className="text-center space-y-2">
-                      <div className="w-16 h-16 rounded-full bg-purple-600/40 text-purple-300 border border-purple-400/50 flex items-center justify-center mx-auto text-xl font-bold">
-                        {selectedDoctorForModal.avatarInitials}
-                      </div>
-                      <span className="font-extrabold text-sm block">
-                        {selectedDoctorForModal.name} (Live Video)
-                      </span>
-                      <span className="text-xs text-slate-400 block">
-                        Full HD encrypted stream running smoothly
-                      </span>
-                    </div>
-
-                    <div className="absolute bottom-3 right-3 w-28 h-20 bg-slate-800 rounded-lg border border-slate-700 flex items-center justify-center text-[10px] text-slate-400">
-                      Your Camera
-                    </div>
-                  </div>
-                  <div className="flex justify-center gap-3 pt-1">
-                    <button
-                      type="button"
-                      onClick={() => setCommsMode(null)}
-                      className="px-5 py-2 rounded-xl bg-red-600 hover:bg-red-700 text-white font-bold text-xs flex items-center gap-1.5 touch-target"
-                    >
-                      <PhoneOff className="w-4 h-4" />
-                      <span>End Video Session</span>
-                    </button>
-                  </div>
-                </div>
-              )}
 
               {/* BACKGROUND: Hospitals/Clinics worked in, Educational background */}
               <div className="space-y-4">
@@ -691,7 +444,7 @@ export function FindDoctorsTabView() {
                   Educational Background &amp; Training
                 </h4>
                 <p className="text-xs sm:text-sm text-slate-700 dark:text-slate-300 leading-relaxed bg-slate-50 dark:bg-slate-950 p-3.5 rounded-xl border border-slate-200 dark:border-slate-800">
-                  {selectedDoctorForModal.education || "MBBS, MD - Specialization in Internal Medicine, Advanced Clinical Fellowship."}
+                  {selectedDoctorForModal.education || "No additional qualification details supplied."}
                 </p>
 
                 <h4 className="text-sm font-black text-slate-900 dark:text-slate-100 uppercase tracking-wider flex items-center gap-2 pt-2">
@@ -709,7 +462,7 @@ export function FindDoctorsTabView() {
                       </span>
                     ))
                   ) : (
-                    <span className="text-xs text-slate-500 dark:text-slate-400">Apollo Hospitals, Manipal Healthcare</span>
+                    <span className="text-xs text-slate-500 dark:text-slate-400">No other affiliations supplied.</span>
                   )}
                 </div>
 
@@ -726,7 +479,7 @@ export function FindDoctorsTabView() {
                 )}
               </div>
 
-              {/* REVIEWS SECTION: Expandable mixed reviews */}
+              {selectedDoctorForModal.reviews.length > 0 && (
               <div className="space-y-3 pt-2 border-t border-slate-200 dark:border-slate-800">
                 <div className="flex items-center justify-between">
                   <h4 className="text-sm font-black text-slate-900 dark:text-slate-100 uppercase tracking-wider flex items-center gap-2">
@@ -774,34 +527,27 @@ export function FindDoctorsTabView() {
                   ))}
                 </div>
               </div>
+              )}
             </div>
 
-            {/* STICKY BOTTOM BUTTON: Book Consultation - ₹[Fee] */}
             <div className="p-4 sm:p-5 bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between gap-4 sticky bottom-0 z-10 shadow-lg">
               <div>
                 <span className="text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider block">
-                  Consultation Fee
+                  Consultation fee
                 </span>
                 <span className="text-xl sm:text-2xl font-black text-slate-900 dark:text-slate-100">
                   {selectedDoctorForModal.consultationFee}
-                  <span className="text-xs font-normal text-slate-500 dark:text-slate-400"> / session</span>
                 </span>
               </div>
 
-              {isBookingSuccess ? (
-                <div className="flex items-center gap-2 px-6 py-3.5 rounded-2xl bg-emerald-600 text-white font-black text-sm shadow-md animate-in zoom-in-95">
-                  <CheckCircle2 className="w-5 h-5" />
-                  <span>Consultation Booked!</span>
-                </div>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => handleBookFromModal(selectedDoctorForModal)}
-                  className="px-6 sm:px-8 py-3.5 rounded-2xl bg-teal-600 hover:bg-teal-700 text-white font-black text-sm shadow-lg shadow-teal-700/25 transition-all transform active:scale-95 touch-target flex items-center gap-2"
+              {selectedDoctorForModal.phone && (
+                <a
+                  href={`tel:${selectedDoctorForModal.phone.replace(/[^\d+]/g, "")}`}
+                  className="px-6 sm:px-8 py-3.5 rounded-2xl bg-teal-600 hover:bg-teal-700 text-white font-black text-sm shadow-lg shadow-teal-700/25 transition-all flex items-center gap-2"
                 >
-                  <Calendar className="w-4 h-4" />
-                  <span>Book Consultation &mdash; {selectedDoctorForModal.consultationFee}</span>
-                </button>
+                  <Phone className="h-4 w-4" />
+                  <span>Call to ask about booking</span>
+                </a>
               )}
             </div>
           </div>

@@ -6,6 +6,7 @@ import Image from "next/image";
 import { useAuth } from "@/context/AuthContext";
 import { readUserLocalData, writeUserLocalData } from "@/lib/localUserData";
 import { dispatchReportExtracted } from "@/lib/reportExtraction";
+import { compressImage } from "@/lib/compressImage";
 
 type DocumentAnalysis = {
   document_type: string;
@@ -152,7 +153,13 @@ export function ClinicalCopilotChat() {
       const formData = new FormData();
       formData.set(image ? "userId" : "patientId", user.id);
       formData.set("message", message);
-      if (image) formData.set("file", image);
+      if (image) formData.set("file", await compressImage(image));
+      else {
+        formData.set("history", JSON.stringify(messages.slice(-8).map(({ role, content }) => ({
+          role,
+          content: content.slice(0, 1500)
+        }))));
+      }
       if (user.isGuest) {
         formData.set("guestDossier", JSON.stringify({
           profile: readUserLocalData(user.id, "clinical_intake", null),

@@ -27,6 +27,9 @@ export interface DoctorProfile {
   ongoingTreatmentsCount?: string;
   rating: number;
   city: string;
+  clinicAddress?: string;
+  phone?: string;
+  subspecialty?: string;
   consultationFee: string;
   feeNumber?: number;
   avatarInitials: string;

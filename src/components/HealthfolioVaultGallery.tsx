@@ -7,6 +7,7 @@ import { usePulse } from "@/context/PulseContext";
 import { getSupabaseClient, requireAuthenticatedUser } from "@/lib/supabase";
 import { isNetworkError, readUserLocalData, writeUserLocalData } from "@/lib/localUserData";
 import { dispatchReportExtracted, reportExtractedEventName, type ReportExtractedDetail } from "@/lib/reportExtraction";
+import { compressImage } from "@/lib/compressImage";
 
 type VaultRecord = {
   id: string;
@@ -285,7 +286,7 @@ export function HealthfolioVaultGallery({ compact = false }: { compact?: boolean
     setIsUploading(true);
     try {
       const formData = new FormData();
-      formData.set("file", file);
+      formData.set("file", await compressImage(file));
       formData.set("userId", userId);
       formData.set("message", "Please extract report metrics and medication details for Healthfolio.");
       const response = await fetch("/api/agent/vault-ingest", {

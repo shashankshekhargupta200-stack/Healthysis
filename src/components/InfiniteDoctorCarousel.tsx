@@ -21,14 +21,14 @@ export function InfiniteDoctorCarousel({ className = "" }: { className?: string 
           </div>
           <div>
             <h3 className="text-sm sm:text-base font-black text-[#123F55] dark:text-slate-100 tracking-tight flex items-center gap-2">
-              <span>Verified Clinical Specialists (30 Doctors)</span>
+              <span>Prayagraj Clinical Specialists ({doctorsList.length} Doctors)</span>
               <span className="hidden sm:inline-flex items-center gap-1 text-[11px] font-extrabold text-[#076584] dark:text-[#77C86F] bg-[#DDF2F0] dark:bg-slate-800 px-2 py-0.5 rounded-full border border-[#DCEAEC] dark:border-slate-700">
                 <CheckCircle2 className="w-3 h-3 text-[#2CAC7F]" />
                 Live on Healthysis
               </span>
             </h3>
             <p className="text-[11px] text-[#537783] dark:text-slate-400 font-medium">
-              Tap any doctor to inspect clinical credentials, ratings, or book a consultation.
+              Tap a listing for qualifications and clinic contact details.
             </p>
           </div>
         </div>
@@ -61,9 +61,11 @@ export function InfiniteDoctorCarousel({ className = "" }: { className?: string 
                 <div className={`w-full h-full rounded-full flex items-center justify-center text-white font-extrabold text-base shadow-inner ${doc.avatarColor}`}>
                   {doc.avatarInitials}
                 </div>
-                <span className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full bg-[#2CAC7F] border-2 border-white dark:border-slate-900 flex items-center justify-center text-[8px] text-white font-black" title="Verified Specialist">
-                  ✓
-                </span>
+                {doc.verified && (
+                  <span className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full bg-[#2CAC7F] border-2 border-white dark:border-slate-900 flex items-center justify-center text-[8px] text-white font-black" title="Verified Specialist">
+                    ✓
+                  </span>
+                )}
               </div>
 
               {/* Doctor Name & Specialty Underneath */}

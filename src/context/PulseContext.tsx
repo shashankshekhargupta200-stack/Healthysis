@@ -11,6 +11,7 @@ import {
   HealthResumeData
 } from "@/types";
 import { createEmptyHealthResume } from "@/lib/healthResumeDefaults";
+import { doctorsList } from "@/lib/doctorsData";
 import { useAuth } from "@/context/AuthContext";
 
 interface PulseContextType {
@@ -192,7 +193,7 @@ export function PulseProvider({ children }: { children: ReactNode }) {
         pendingMealImage,
         setPendingMealImage,
         mythCards,
-        doctorsList: [],
+        doctorsList,
         searchQuery,
         setSearchQuery,
         setLanguage,

@@ -15,6 +15,7 @@ import { useAuth } from "@/context/AuthContext";
 import { usePulse } from "@/context/PulseContext";
 import { getSupabaseClient, requireAuthenticatedUser } from "@/lib/supabase";
 import { isNetworkError, readUserLocalData, writeUserLocalData } from "@/lib/localUserData";
+import { compressImage } from "@/lib/compressImage";
 
 interface MealAnalysis {
   itemName: string;
@@ -228,9 +229,10 @@ export function MealSnapTabView() {
       setCapturedImage(dataUrl);
       const imageBlob = await fetch(dataUrl).then((response) => response.blob());
       const file = new File([imageBlob], `healthysis-upload.${mimeType.split("/")[1] || "jpg"}`, { type: mimeType });
+      const compressedFile = await compressImage(file);
       const formData = new FormData();
       formData.set("userId", userId ?? "");
-      formData.set("file", file);
+      formData.set("file", compressedFile);
       const response = await fetch("/api/agent/vault-ingest", {
         method: "POST",
         headers: session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : undefined,
