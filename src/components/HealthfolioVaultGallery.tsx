@@ -1,13 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
-import { AlertTriangle, FileImage, FileText, FolderOpen, LoaderCircle, Upload, X } from "lucide-react";
+import { AlertTriangle, Check, Edit3, FileImage, FileText, FolderOpen, LoaderCircle, Trash2, Upload, UserCheck, X } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { usePulse } from "@/context/PulseContext";
+import { useVaultUpload } from "@/context/VaultUploadContext";
 import { getSupabaseClient, requireAuthenticatedUser } from "@/lib/supabase";
 import { isNetworkError, readUserLocalData, writeUserLocalData } from "@/lib/localUserData";
-import { dispatchReportExtracted, reportExtractedEventName, type ReportExtractedDetail } from "@/lib/reportExtraction";
-import { compressImage } from "@/lib/compressImage";
+import { reportExtractedEventName, type ReportExtractedDetail } from "@/lib/reportExtraction";
 
 type VaultRecord = {
   id: string;
@@ -103,6 +103,15 @@ function normalizeRecord(value: unknown): VaultRecord | null {
   };
 }
 
+function sortNewestFirst(records: VaultRecord[]): VaultRecord[] {
+  return [...records].sort((a, b) => {
+    const tA = new Date(a.created_at || 0).getTime();
+    const tB = new Date(b.created_at || 0).getTime();
+    if (tB !== tA) return tB - tA;
+    return (b.id || "").localeCompare(a.id || "");
+  });
+}
+
 function statusFor(record: VaultRecord, label: string): string {
   const flags = Array.isArray(record.extracted_data.status_flags) ? record.extracted_data.status_flags : [];
   const flag = flags.find((entry) => isRecord(entry)
@@ -113,10 +122,12 @@ function statusFor(record: VaultRecord, label: string): string {
 
 function RecordCard({
   record,
-  onView
+  onView,
+  onDelete
 }: {
   record: VaultRecord;
   onView: (record: VaultRecord) => void;
+  onDelete?: (record: VaultRecord) => void;
 }) {
   const biomarkers = Array.isArray(record.extracted_data.biomarkers)
     ? record.extracted_data.biomarkers.filter(isRecord)
@@ -176,17 +187,30 @@ function RecordCard({
           ))}
         </ul>
       )}
-      <button
-        className="inline-flex items-center gap-2 rounded-xl border border-[#DCEAEC] px-3 py-2 text-xs font-bold text-[#076584] disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:text-teal-300"
-        disabled={!record.file_url}
-        onClick={() => onView(record)}
-        type="button"
-      >
-        {record.file_url?.toLowerCase().includes(".pdf") || record.file_url?.startsWith("data:application/pdf")
-          ? <FileText className="h-4 w-4" />
-          : <FileImage className="h-4 w-4" />}
-        View Original Scan
-      </button>
+      <footer className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-slate-100 dark:border-slate-800/60">
+        <button
+          className="inline-flex items-center gap-2 rounded-xl border border-[#DCEAEC] px-3 py-2 text-xs font-bold text-[#076584] disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:text-teal-300 hover:bg-[#F0F8F9] dark:hover:bg-slate-800 transition-colors"
+          disabled={!record.file_url}
+          onClick={() => onView(record)}
+          type="button"
+        >
+          {record.file_url?.toLowerCase().includes(".pdf") || record.file_url?.startsWith("data:application/pdf")
+            ? <FileText className="h-4 w-4" />
+            : <FileImage className="h-4 w-4" />}
+          View Original Scan
+        </button>
+        {onDelete && (
+          <button
+            aria-label={`Delete ${record.title}`}
+            className="inline-flex items-center gap-1.5 rounded-xl border border-rose-200 px-3 py-2 text-xs font-bold text-rose-700 hover:bg-rose-50 dark:border-rose-900/60 dark:text-rose-400 dark:hover:bg-rose-950/40 transition-colors"
+            onClick={() => onDelete(record)}
+            type="button"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            Delete
+          </button>
+        )}
+      </footer>
     </article>
   );
 }
@@ -195,13 +219,39 @@ export function HealthfolioVaultGallery({ compact = false }: { compact?: boolean
   const { user, session } = useAuth();
   const { setActiveTab } = usePulse();
   const userId = user?.id ?? "";
+
+  const {
+    activeJob,
+    isUploading,
+    uploadProgress,
+    uploadError,
+    startUpload,
+    cancelUpload,
+    confirmAndSave,
+    saveDuplicateAnyway,
+    dismissVerification,
+    dismissDuplicate,
+    editedProfileName,
+    setEditedProfileName,
+    isEditingProfileName,
+    setIsEditingProfileName,
+    nameUpdateSuccess,
+    isUpdatingName,
+    updateProfileNameInJob
+  } = useVaultUpload();
+
+  const pendingVerification = activeJob?.pendingVerification;
+  const pendingDuplicate = activeJob?.pendingDuplicate;
+  const isSavingJob = activeJob?.status === "saving";
+
   const [records, setRecords] = useState<VaultRecord[]>([]);
   const [activeFilter, setActiveFilter] = useState<(typeof filters)[number]["value"]>("all");
   const [isLoading, setIsLoading] = useState(true);
-  const [isUploading, setIsUploading] = useState(false);
   const [loadError, setLoadError] = useState("");
-  const [uploadError, setUploadError] = useState("");
+  const [deleteError, setDeleteError] = useState("");
   const [selectedRecord, setSelectedRecord] = useState<VaultRecord | null>(null);
+  const [recordToDelete, setRecordToDelete] = useState<VaultRecord | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const loadRecords = useCallback(async () => {
@@ -211,9 +261,11 @@ export function HealthfolioVaultGallery({ compact = false }: { compact?: boolean
       setIsLoading(false);
       return;
     }
-    const localRecords = readUserLocalData<unknown[]>(userId, "patient_memory_vault", [])
-      .map(normalizeRecord)
-      .filter((record): record is VaultRecord => record !== null);
+    const localRecords = sortNewestFirst(
+      readUserLocalData<unknown[]>(userId, "patient_memory_vault", [])
+        .map(normalizeRecord)
+        .filter((record): record is VaultRecord => record !== null)
+    );
     if (user?.isGuest) {
       setRecords(localRecords);
       setIsLoading(false);
@@ -228,7 +280,9 @@ export function HealthfolioVaultGallery({ compact = false }: { compact?: boolean
         .order("created_at", { ascending: false })
         .limit(100);
       if (error) throw error;
-      const cloudRecords = (data ?? []).map(normalizeRecord).filter((record): record is VaultRecord => record !== null);
+      const cloudRecords = sortNewestFirst(
+        (data ?? []).map(normalizeRecord).filter((record): record is VaultRecord => record !== null)
+      );
       setRecords(cloudRecords.length > 0 ? cloudRecords : localRecords);
       if (cloudRecords.length > 0) writeUserLocalData(userId, "patient_memory_vault", cloudRecords);
       setLoadError("");
@@ -258,87 +312,75 @@ export function HealthfolioVaultGallery({ compact = false }: { compact?: boolean
         void loadRecords();
         return;
       }
-      setRecords((current) => [record, ...current.filter((item) => item.id !== record.id)]);
+      setRecords((current) => sortNewestFirst([record, ...current.filter((item) => item.id !== record.id)]));
       if (userId) {
         const existing = readUserLocalData<VaultRecord[]>(userId, "patient_memory_vault", []);
-        writeUserLocalData(userId, "patient_memory_vault", [record, ...existing.filter((item) => item.id !== record.id)].slice(0, 100));
+        writeUserLocalData(userId, "patient_memory_vault", sortNewestFirst([record, ...existing.filter((item) => item.id !== record.id)]).slice(0, 100));
       }
     };
     window.addEventListener(reportExtractedEventName, onReportExtracted);
     return () => window.removeEventListener(reportExtractedEventName, onReportExtracted);
   }, [loadRecords, userId]);
 
-  const upload = async (event: ChangeEvent<HTMLInputElement>) => {
+  const onFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
-    if (!file) return;
-    setUploadError("");
-    if (!file.type.startsWith("image/") && file.type !== "application/pdf") {
-      setUploadError("Choose an image or PDF report.");
-      event.target.value = "";
-      return;
+    if (file) {
+      void startUpload(file);
     }
-    if (!userId) {
-      setUploadError("Sign in or continue as guest before uploading a report.");
-      event.target.value = "";
-      return;
-    }
+    event.target.value = "";
+  };
 
-    setIsUploading(true);
+  const confirmDeleteRecord = async () => {
+    if (!recordToDelete) return;
+    setIsDeleting(true);
+    setDeleteError("");
     try {
-      const formData = new FormData();
-      formData.set("file", await compressImage(file));
-      formData.set("userId", userId);
-      formData.set("message", "Please extract report metrics and medication details for Healthfolio.");
       const response = await fetch("/api/agent/vault-ingest", {
-        method: "POST",
-        headers: session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : undefined,
-        body: formData
+        method: "DELETE",
+        headers: {
+          "Content-Type": "application/json",
+          ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {})
+        },
+        body: JSON.stringify({
+          recordId: recordToDelete.id,
+          storagePath: recordToDelete.storage_path,
+          userId
+        })
       });
+
       const text = await response.text();
-      let result: {
-        success?: boolean;
-        error?: string;
-        vaultRecord?: unknown;
-        extracted_data?: Record<string, unknown>;
-        status_flags?: ReportExtractedDetail["status_flags"];
-        category?: string;
-        patientSummary?: string;
-      } = {};
+      let result: { success?: boolean; error?: string } = {};
       try {
-        result = text ? JSON.parse(text) as typeof result : {};
+        result = text ? (JSON.parse(text) as typeof result) : {};
       } catch {
-        throw new Error("The document service returned an unreadable response.");
-      }
-      const record = normalizeRecord(result.vaultRecord);
-      if (!response.ok || !result.success || !record) {
-        throw new Error(result.error || response.statusText || "Could not analyze this report.");
+        // proceed
       }
 
-      setRecords((current) => [record, ...current.filter((item) => item.id !== record.id)]);
-      if (user?.isGuest || !record.file_url || record.file_url.startsWith("data:")) {
+      if (!response.ok || result.success === false) {
+        throw new Error(result.error || response.statusText || "Could not delete this report.");
+      }
+
+      setRecords((prev) => prev.filter((r) => r.id !== recordToDelete.id));
+      if (userId) {
         const existing = readUserLocalData<VaultRecord[]>(userId, "patient_memory_vault", []);
-        writeUserLocalData(userId, "patient_memory_vault", [record, ...existing.filter((item) => item.id !== record.id)].slice(0, 100));
+        writeUserLocalData(
+          userId,
+          "patient_memory_vault",
+          existing.filter((r) => r.id !== recordToDelete.id)
+        );
       }
-      if (result.category === "lab_report" || result.category === "prescription") {
-        dispatchReportExtracted({
-          category: result.category,
-          extracted_data: result.extracted_data ?? record.extracted_data,
-          status_flags: result.status_flags ?? [],
-          title: record.title,
-          patient_summary: result.patientSummary ?? record.patient_summary,
-          vaultRecord: record as unknown as Record<string, unknown>
-        });
+      if (selectedRecord?.id === recordToDelete.id) {
+        setSelectedRecord(null);
       }
-    } catch (error: unknown) {
-      setUploadError(error instanceof Error ? error.message : "Could not analyze this report.");
+      setRecordToDelete(null);
+    } catch (err: unknown) {
+      setDeleteError(err instanceof Error ? err.message : "Could not delete this report.");
     } finally {
-      setIsUploading(false);
-      event.target.value = "";
+      setIsDeleting(false);
     }
   };
 
   const openOriginal = async (record: VaultRecord) => {
-    setUploadError("");
     if (record.storage_path && !record.file_url?.startsWith("data:") && !user?.isGuest) {
       try {
         const supabase = getSupabaseClient();
@@ -349,13 +391,14 @@ export function HealthfolioVaultGallery({ compact = false }: { compact?: boolean
         setSelectedRecord({ ...record, file_url: data.signedUrl, document_url: data.signedUrl });
         return;
       } catch (error: unknown) {
-        setUploadError(error instanceof Error ? error.message : "Could not open the original scan.");
+        console.warn("Could not open the original scan signed URL:", error);
       }
     }
     setSelectedRecord(record);
   };
-  const visibleRecords = records.filter((record) => activeFilter === "all" || record.storage_folder === activeFilter);
-  const reportRecords = records.filter((record) => record.storage_folder === "lab-reports");
+
+  const visibleRecords = sortNewestFirst(records.filter((record) => activeFilter === "all" || record.storage_folder === activeFilter));
+  const reportRecords = sortNewestFirst(records.filter((record) => record.storage_folder === "lab-reports"));
   const recordsToShow = compact ? reportRecords.slice(0, 2) : visibleRecords;
 
   return (
@@ -375,7 +418,7 @@ export function HealthfolioVaultGallery({ compact = false }: { compact?: boolean
             type="button"
           >
             {isUploading ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
-            {isUploading ? "Analyzing report…" : "Upload Report"}
+            {isUploading ? uploadProgress : "Upload Report"}
           </button>
         )}
       </header>
@@ -396,13 +439,34 @@ export function HealthfolioVaultGallery({ compact = false }: { compact?: boolean
           <input
             accept="image/*,application/pdf"
             className="hidden"
-            onChange={(event) => void upload(event)}
+            onChange={onFileChange}
             ref={fileInputRef}
             type="file"
           />
         </>
       )}
+      {isUploading && (
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-2xl border border-teal-200 bg-teal-50/80 p-4 text-sm font-semibold text-[#076584] dark:border-teal-900/50 dark:bg-teal-950/40 dark:text-teal-200 animate-in fade-in duration-200">
+          <div className="flex items-center gap-3">
+            <LoaderCircle className="h-5 w-5 animate-spin shrink-0 text-[#04939D]" />
+            <div>
+              <p className="font-extrabold text-[#123F55] dark:text-slate-100">{uploadProgress}</p>
+              <p className="text-xs font-normal text-[#537783] dark:text-slate-400 mt-0.5">
+                AI document analysis runs persistently in the background. Safe to switch tabs.
+              </p>
+            </div>
+          </div>
+          <button
+            className="self-end sm:self-auto rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-xs font-bold text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700 transition-colors"
+            onClick={cancelUpload}
+            type="button"
+          >
+            Cancel Upload
+          </button>
+        </div>
+      )}
       {uploadError && <p className="flex items-start gap-2 rounded-xl bg-rose-50 p-3 text-sm text-rose-800" role="alert"><AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />{uploadError}</p>}
+      {deleteError && <p className="flex items-start gap-2 rounded-xl bg-rose-50 p-3 text-sm text-rose-800" role="alert"><AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />{deleteError}</p>}
       {loadError && <p className="flex items-start gap-2 rounded-xl bg-amber-50 p-3 text-sm text-amber-900" role="alert"><AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />{loadError}</p>}
       {isLoading ? (
         <p className="flex items-center gap-2 py-6 text-sm text-[#537783]" role="status"><LoaderCircle className="h-4 w-4 animate-spin" />Loading your vault…</p>
@@ -413,7 +477,386 @@ export function HealthfolioVaultGallery({ compact = false }: { compact?: boolean
         </div>
       ) : (
         <div className={`grid gap-4 ${compact ? "" : "lg:grid-cols-2"}`}>
-          {recordsToShow.map((record) => <RecordCard key={record.id} onView={openOriginal} record={record} />)}
+          {recordsToShow.map((record) => (
+            <RecordCard
+              key={record.id}
+              onDelete={(rec) => {
+                setDeleteError("");
+                setRecordToDelete(rec);
+              }}
+              onView={openOriginal}
+              record={record}
+            />
+          ))}
+        </div>
+      )}
+
+      {/* Pre-Save Duplicate Report Detection Modal */}
+      {pendingDuplicate && (
+        <div
+          aria-labelledby="duplicate-alert-title"
+          aria-modal="true"
+          className="fixed inset-0 z-[130] flex items-center justify-center bg-slate-950/75 p-4 backdrop-blur-xs animate-in fade-in duration-200"
+          role="dialog"
+        >
+          <div className="flex max-h-[92vh] w-full max-w-lg flex-col overflow-hidden rounded-3xl border border-amber-300 bg-white shadow-2xl dark:border-amber-900/60 dark:bg-slate-900">
+            <div className="border-b border-amber-200 bg-amber-50/80 p-5 dark:border-amber-950 dark:bg-amber-950/30 flex items-start justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-amber-300 bg-amber-100 text-amber-800 dark:border-amber-800 dark:bg-amber-900/60 dark:text-amber-200">
+                  <AlertTriangle className="h-6 w-6" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-black text-amber-950 dark:text-amber-100" id="duplicate-alert-title">
+                    Duplicate Report Detected
+                  </h3>
+                  <p className="text-xs font-medium text-amber-800 dark:text-amber-300">
+                    Pre-save Database Duplicate Check
+                  </p>
+                </div>
+              </div>
+              <button
+                aria-label="Cancel and close"
+                className="rounded-xl p-2 text-slate-400 hover:bg-white hover:text-slate-700 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+                disabled={isSavingJob}
+                onClick={dismissDuplicate}
+                type="button"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="overflow-y-auto p-6 space-y-4 text-sm">
+              <p className="text-[#315D68] dark:text-slate-300 leading-relaxed">
+                This document appears to match a report already saved in your Healthfolio vault:
+              </p>
+
+              <div className="rounded-2xl border border-amber-200 bg-amber-50/50 p-4 dark:border-amber-900/50 dark:bg-amber-950/20 space-y-2">
+                <div className="flex items-center justify-between text-[11px] font-black uppercase tracking-wider text-amber-800 dark:text-amber-300">
+                  <span>Existing Report In Vault</span>
+                  <span>{pendingDuplicate.duplicateReason === "hash" ? "Identical File Fingerprint" : "Matching Test & Date"}</span>
+                </div>
+                <p className="text-base font-extrabold text-amber-950 dark:text-amber-100">
+                  {pendingDuplicate.existingRecord.title}
+                </p>
+                <p className="text-xs text-[#537783] dark:text-slate-400">
+                  Uploaded on: {new Date(pendingDuplicate.existingRecord.created_at).toLocaleString()}
+                </p>
+                <p className="text-xs italic text-amber-900 dark:text-amber-200">
+                  {pendingDuplicate.duplicateDetails}
+                </p>
+              </div>
+
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-xs text-slate-700 dark:border-slate-800 dark:bg-slate-950 dark:text-slate-300 space-y-1.5">
+                <p className="font-bold">What would you like to do?</p>
+                <ul className="list-disc pl-4 space-y-1">
+                  <li><strong>Keep Existing Report:</strong> Discard this duplicate upload to keep your vault clean.</li>
+                  <li><strong>Save Anyway:</strong> Upload and save a new copy to your vault regardless.</li>
+                </ul>
+              </div>
+            </div>
+
+            <div className="border-t border-[#DCEAEC] bg-[#F8FBFC] p-4 dark:border-slate-800 dark:bg-slate-950 flex flex-col-reverse sm:flex-row items-center justify-end gap-3">
+              <button
+                className="w-full sm:w-auto rounded-xl border border-slate-300 px-4 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                disabled={isSavingJob}
+                onClick={() => {
+                  dismissDuplicate();
+                  if (fileInputRef.current) fileInputRef.current.value = "";
+                }}
+                type="button"
+              >
+                Keep Existing (Cancel Upload)
+              </button>
+              <button
+                className="w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-xl bg-[#04939D] px-5 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-[#037c85] disabled:opacity-60"
+                disabled={isSavingJob}
+                onClick={() => void saveDuplicateAnyway()}
+                type="button"
+              >
+                {isSavingJob ? (
+                  <>
+                    <LoaderCircle className="h-4 w-4 animate-spin" />
+                    Saving anyway…
+                  </>
+                ) : (
+                  "Save Anyway"
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Confirmation Modal */}
+      {recordToDelete && (
+        <div
+          aria-labelledby="delete-dialog-title"
+          aria-modal="true"
+          className="fixed inset-0 z-[140] flex items-center justify-center bg-slate-950/75 p-4 backdrop-blur-xs animate-in fade-in duration-200"
+          role="dialog"
+        >
+          <div className="flex max-h-[92vh] w-full max-w-md flex-col overflow-hidden rounded-3xl border border-rose-200 bg-white shadow-2xl dark:border-rose-950 dark:bg-slate-900">
+            <div className="border-b border-rose-100 bg-rose-50/70 p-5 dark:border-rose-950 dark:bg-rose-950/30 flex items-start justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-rose-200 bg-rose-100 text-rose-700 dark:border-rose-800 dark:bg-rose-900/60 dark:text-rose-200">
+                  <Trash2 className="h-5 w-5" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-black text-rose-950 dark:text-rose-100" id="delete-dialog-title">
+                    Delete Report Record?
+                  </h3>
+                  <p className="text-xs font-medium text-rose-700 dark:text-rose-300">
+                    This action cannot be undone
+                  </p>
+                </div>
+              </div>
+              <button
+                aria-label="Close"
+                className="rounded-xl p-2 text-slate-400 hover:bg-white hover:text-slate-700 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+                disabled={isDeleting}
+                onClick={() => setRecordToDelete(null)}
+                type="button"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4 text-sm">
+              <p className="text-slate-700 dark:text-slate-300 leading-relaxed">
+                Are you sure you want to permanently delete this report from your vault?
+              </p>
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-slate-800 dark:bg-slate-950">
+                <p className="font-extrabold text-[#123F55] dark:text-slate-100">{recordToDelete.title}</p>
+                <p className="mt-1 text-xs text-[#537783] dark:text-slate-400">
+                  Uploaded {new Date(recordToDelete.created_at).toLocaleString()} · {recordToDelete.storage_folder}
+                </p>
+              </div>
+              <p className="text-xs text-rose-700 dark:text-rose-400">
+                The stored report file in cloud storage and its extracted biomarkers will be permanently removed.
+              </p>
+            </div>
+
+            <div className="border-t border-slate-100 bg-[#F8FBFC] p-4 dark:border-slate-800 dark:bg-slate-950 flex flex-col-reverse sm:flex-row items-center justify-end gap-3">
+              <button
+                className="w-full sm:w-auto rounded-xl border border-slate-300 px-4 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                disabled={isDeleting}
+                onClick={() => setRecordToDelete(null)}
+                type="button"
+              >
+                Cancel
+              </button>
+              <button
+                className="w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-xl bg-rose-600 px-5 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-rose-700 disabled:opacity-60"
+                disabled={isDeleting}
+                onClick={() => void confirmDeleteRecord()}
+                type="button"
+              >
+                {isDeleting ? (
+                  <>
+                    <LoaderCircle className="h-4 w-4 animate-spin" />
+                    Deleting…
+                  </>
+                ) : (
+                  <>
+                    <Trash2 className="h-4 w-4" />
+                    Delete Record
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Pre-Save Patient Name Verification Confirmation Modal */}
+      {pendingVerification && (
+        <div
+          aria-labelledby="patient-verification-title"
+          aria-modal="true"
+          className="fixed inset-0 z-[130] flex items-center justify-center bg-slate-950/75 p-4 backdrop-blur-xs animate-in fade-in duration-200"
+          role="dialog"
+        >
+          <div className="flex max-h-[92vh] w-full max-w-lg flex-col overflow-hidden rounded-3xl border border-[#DCEAEC] bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-900">
+            {/* Header */}
+            <div
+              className={`border-b p-5 flex items-start justify-between gap-4 ${
+                pendingVerification.verificationStatus === "mismatch"
+                  ? "border-rose-200 bg-rose-50/70 dark:border-rose-950 dark:bg-rose-950/30"
+                  : "border-teal-200 bg-teal-50/60 dark:border-teal-950 dark:bg-teal-950/20"
+              }`}
+            >
+              <div className="flex items-center gap-3">
+                <div
+                  className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border ${
+                    pendingVerification.verificationStatus === "mismatch"
+                      ? "border-rose-200 bg-rose-100 text-rose-700 dark:border-rose-800 dark:bg-rose-900/60 dark:text-rose-200"
+                      : "border-teal-200 bg-teal-100 text-teal-800 dark:border-teal-800 dark:bg-teal-900/60 dark:text-teal-200"
+                  }`}
+                >
+                  {pendingVerification.verificationStatus === "mismatch" ? (
+                    <AlertTriangle className="h-6 w-6" />
+                  ) : (
+                    <UserCheck className="h-6 w-6" />
+                  )}
+                </div>
+                <div>
+                  <h3
+                    className={`text-lg font-black ${
+                      pendingVerification.verificationStatus === "mismatch"
+                        ? "text-rose-900 dark:text-rose-200"
+                        : "text-[#123F55] dark:text-slate-100"
+                    }`}
+                    id="patient-verification-title"
+                  >
+                    {pendingVerification.verificationStatus === "mismatch"
+                      ? "Patient Name Mismatch Detected"
+                      : "Confirm Report Ownership"}
+                  </h3>
+                  <p className="text-xs text-[#537783] dark:text-slate-400 font-medium">
+                    Pre-save AI Verification Check
+                  </p>
+                </div>
+              </div>
+              <button
+                aria-label="Cancel and close"
+                className="rounded-xl p-2 text-slate-400 hover:bg-white/80 hover:text-slate-700 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+                disabled={isSavingJob}
+                onClick={dismissVerification}
+                type="button"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            {/* Body */}
+            <div className="overflow-y-auto p-6 space-y-5 text-sm">
+              {pendingVerification.verificationStatus === "mismatch" ? (
+                <>
+                  <p className="text-[#315D68] dark:text-slate-300 leading-relaxed">
+                    The patient name detected on this lab report does not match the active name on your account:
+                  </p>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div className="rounded-2xl border border-rose-200 bg-rose-50/50 p-3.5 dark:border-rose-900/50 dark:bg-rose-950/20">
+                      <span className="text-[11px] font-black uppercase tracking-wider text-rose-700 dark:text-rose-300 block">
+                        Detected on Report
+                      </span>
+                      <span className="mt-1 block text-base font-extrabold text-rose-950 dark:text-rose-100">
+                        {pendingVerification.detectedPatientName || "Unknown"}
+                      </span>
+                    </div>
+                    <div className="rounded-2xl border border-[#DCEAEC] bg-[#F8FBFC] p-3.5 dark:border-slate-800 dark:bg-slate-950">
+                      <span className="text-[11px] font-black uppercase tracking-wider text-[#076584] dark:text-teal-400 block">
+                        Active Account Name
+                      </span>
+                      <span className="mt-1 block text-base font-extrabold text-[#123F55] dark:text-slate-100">
+                        {pendingVerification.expectedPatientName || "No name set"}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-amber-200 bg-amber-50/70 p-4 text-xs text-amber-900 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-200 space-y-1.5">
+                    <p className="font-bold">Please verify how you would like to proceed:</p>
+                    <ul className="list-disc pl-4 space-y-1">
+                      <li>Does this report belong to you under an alternate or family name?</li>
+                      <li>Did you enter a different name or typo when setting up your account?</li>
+                      <li>Or did you accidentally select someone else&apos;s lab report?</li>
+                    </ul>
+                  </div>
+
+                  {/* Optional Quick Edit for Typo in Profile Name */}
+                  <div className="rounded-2xl border border-[#DCEAEC] p-4 bg-[#F8FBFC] dark:border-slate-800 dark:bg-slate-950/60 space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-[#123F55] dark:text-slate-200 flex items-center gap-1.5">
+                        <Edit3 className="h-3.5 w-3.5 text-[#04939D]" />
+                        Typo in your profile name?
+                      </span>
+                      {!isEditingProfileName && (
+                        <button
+                          className="text-xs font-bold text-[#04939D] hover:underline"
+                          onClick={() => setIsEditingProfileName(true)}
+                          type="button"
+                        >
+                          Quick edit
+                        </button>
+                      )}
+                    </div>
+                    {isEditingProfileName && (
+                      <div className="space-y-2 pt-1">
+                        <div className="flex gap-2">
+                          <input
+                            className="flex-1 rounded-xl border border-[#DCEAEC] bg-white px-3 py-2 text-xs font-semibold text-[#123F55] focus:border-[#04939D] focus:outline-hidden dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+                            onChange={(e) => setEditedProfileName(e.target.value)}
+                            placeholder="Enter your correct full name"
+                            type="text"
+                            value={editedProfileName}
+                          />
+                          <button
+                            className="inline-flex items-center gap-1 rounded-xl bg-[#076584] px-3 py-2 text-xs font-bold text-white hover:bg-[#06546e] disabled:opacity-50"
+                            disabled={isUpdatingName || !editedProfileName.trim()}
+                            onClick={() => void updateProfileNameInJob()}
+                            type="button"
+                          >
+                            {isUpdatingName ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+                            Update
+                          </button>
+                        </div>
+                        {nameUpdateSuccess && (
+                          <p className="text-[11px] font-semibold text-emerald-700 dark:text-emerald-400">
+                            Profile name updated to &quot;{editedProfileName.trim()}&quot;!
+                          </p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <p className="text-[#315D68] dark:text-slate-300 leading-relaxed">
+                    No legible patient name could be detected on this lab report (it may be cropped, unprinted, or handwritten).
+                  </p>
+                  <div className="rounded-2xl border border-teal-200 bg-teal-50/50 p-4 dark:border-teal-900/50 dark:bg-teal-950/20">
+                    <span className="text-[11px] font-black uppercase tracking-wider text-[#076584] dark:text-teal-400 block">
+                      Active Account Name
+                    </span>
+                    <span className="mt-1 block text-base font-extrabold text-[#123F55] dark:text-slate-100">
+                      {pendingVerification.expectedPatientName || "Active User"}
+                    </span>
+                    <p className="mt-2 text-xs text-[#537783] dark:text-slate-400">
+                      Please confirm that this report belongs to you before saving to your Healthfolio.
+                    </p>
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* Footer with Explicit Actions */}
+            <div className="border-t border-[#DCEAEC] bg-[#F8FBFC] p-4 dark:border-slate-800 dark:bg-slate-950 flex flex-col-reverse sm:flex-row items-center justify-end gap-3">
+              <button
+                className="w-full sm:w-auto rounded-xl border border-slate-300 px-4 py-2.5 text-xs font-bold text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+                disabled={isSavingJob}
+                onClick={dismissVerification}
+                type="button"
+              >
+                Cancel Upload
+              </button>
+              <button
+                className="w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-xl bg-[#04939D] px-5 py-2.5 text-xs font-bold text-white shadow-sm hover:bg-[#037c85] disabled:opacity-60"
+                disabled={isSavingJob}
+                onClick={() => void confirmAndSave()}
+                type="button"
+              >
+                {isSavingJob ? (
+                  <>
+                    <LoaderCircle className="h-4 w-4 animate-spin" />
+                    Saving to Healthfolio…
+                  </>
+                ) : (
+                  "Save to My Healthfolio"
+                )}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -427,13 +870,26 @@ export function HealthfolioVaultGallery({ compact = false }: { compact?: boolean
               </div>
               <button aria-label="Close original scan" className="rounded-lg p-2 hover:bg-slate-100 dark:hover:bg-slate-800" onClick={() => setSelectedRecord(null)} type="button"><X className="h-5 w-5" /></button>
             </header>
-            <a
-              className="m-4 inline-flex w-fit items-center gap-2 rounded-xl bg-[#04939D] px-4 py-2 text-sm font-bold text-white"
-              download={`${selectedRecord.title.replace(/[^a-z0-9-_]+/gi, "-")}.${originalFileExtension(selectedRecord)}`}
-              href={selectedRecord.file_url ?? ""}
-            >
-              Download Original
-            </a>
+            <div className="m-4 flex flex-wrap items-center gap-3">
+              <a
+                className="inline-flex w-fit items-center gap-2 rounded-xl bg-[#04939D] px-4 py-2 text-sm font-bold text-white shadow-sm hover:bg-[#037c85]"
+                download={`${selectedRecord.title.replace(/[^a-z0-9-_]+/gi, "-")}.${originalFileExtension(selectedRecord)}`}
+                href={selectedRecord.file_url ?? ""}
+              >
+                Download Original
+              </a>
+              <button
+                className="inline-flex items-center gap-2 rounded-xl border border-rose-200 px-4 py-2 text-sm font-bold text-rose-700 hover:bg-rose-50 dark:border-rose-900/60 dark:text-rose-400 dark:hover:bg-rose-950/40"
+                onClick={() => {
+                  setDeleteError("");
+                  setRecordToDelete(selectedRecord);
+                }}
+                type="button"
+              >
+                <Trash2 className="h-4 w-4" />
+                Delete Report
+              </button>
+            </div>
             {selectedRecord.file_url?.toLowerCase().includes(".pdf") || selectedRecord.file_url?.startsWith("data:application/pdf") ? (
               <iframe className="min-h-[65vh] w-full flex-1" src={selectedRecord.file_url ?? ""} title={`${selectedRecord.title} original document`} />
             ) : (

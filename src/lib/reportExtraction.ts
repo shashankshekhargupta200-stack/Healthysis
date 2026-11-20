@@ -13,6 +13,7 @@ export type ReportExtractedDetail = {
   title: string;
   patient_summary: string;
   vaultRecord?: Record<string, unknown>;
+  detectedPatientName?: string | null;
 };
 
 export const reportExtractedEventName = "healthysis:report-extracted";

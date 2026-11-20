@@ -50,6 +50,7 @@ interface AuthContextValue {
   verifyPasswordResetOtp: (email: string, token: string) => Promise<void>;
   updatePassword: (password: string) => Promise<void>;
   logout: () => Promise<void>;
+  updateAuthUser: (updates: { name?: string; phone?: string; email?: string }) => void;
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
@@ -446,6 +447,34 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setIsPasswordRecovery(false);
   }, [guestUser]);
 
+  const updateAuthUser = useCallback((updates: { name?: string; phone?: string; email?: string }) => {
+    if (guestUser) {
+      const updatedGuest: AuthUser = {
+        ...guestUser,
+        ...(updates.name ? { name: updates.name.trim() } : {}),
+        ...(updates.phone ? { phone: updates.phone.trim() } : {}),
+        ...(updates.email ? { email: updates.email.trim() } : {})
+      };
+      setGuestUser(updatedGuest);
+      if (typeof window !== "undefined") {
+        try {
+          window.localStorage.setItem(GUEST_SESSION_KEY, JSON.stringify(updatedGuest));
+        } catch (error: unknown) {
+          console.warn("Could not persist guest session update.", error);
+        }
+      }
+    }
+
+    if (session?.user) {
+      setProfile((prev) => ({
+        id: session.user.id,
+        full_name: updates.name?.trim() ?? prev?.full_name ?? "",
+        phone: updates.phone?.trim() ?? prev?.phone ?? null,
+        patient_id: prev?.patient_id ?? null
+      }));
+    }
+  }, [guestUser, session]);
+
   const user = useMemo(() => guestUser ?? toAuthUser(session, profile), [guestUser, session, profile]);
   const isAuthenticated = Boolean(session || guestUser);
   const value = useMemo(() => ({
@@ -461,7 +490,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     requestPasswordReset,
     verifyPasswordResetOtp,
     updatePassword,
-    logout
+    logout,
+    updateAuthUser
   }), [
     session,
     user,
@@ -475,7 +505,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     requestPasswordReset,
     verifyPasswordResetOtp,
     updatePassword,
-    logout
+    logout,
+    updateAuthUser
   ]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

@@ -2,6 +2,7 @@
 
 import React from "react";
 import { usePulse } from "@/context/PulseContext";
+import { useAuth } from "@/context/AuthContext";
 import {
   ShieldCheck,
   Stethoscope,
@@ -21,11 +22,14 @@ interface NavbarProps {
 export function Navbar({ onOpenProfile }: NavbarProps) {
   const {
     profile,
+    healthResume,
     setIsSosOpen,
     replaySplash,
     theme,
     toggleTheme
   } = usePulse();
+  const { user } = useAuth();
+  const activeDisplayName = (profile.name || healthResume.fullName || user?.name || "").trim();
 
   return (
     <header className="sticky top-0 z-40 w-full bg-white/95 dark:bg-slate-950/95 backdrop-blur-md border-b border-[#DCEAEC] dark:border-slate-800 shadow-xs transition-colors duration-200">
@@ -51,16 +55,19 @@ export function Navbar({ onOpenProfile }: NavbarProps) {
         {/* TOP RIGHT: ID Badge, Replay Splash, Profile & SOS Icon      */}
         {/* ========================================================== */}
         <div className="flex items-center gap-2 sm:gap-3">
-          {/* Active Health ID badge */}
+          {/* Active Health / User Badge */}
           <div className="px-3 sm:px-4 py-2 rounded-2xl bg-[#DDF2F0] dark:bg-slate-900 border border-[#DCEAEC] dark:border-slate-800 flex items-center gap-2 shadow-xs">
             {profile.role === "doctor" ? (
               <Stethoscope className="w-4 h-4 text-[#076584] dark:text-[#0EA6B7] shrink-0" />
             ) : (
               <ShieldCheck className="w-4 h-4 text-[#04939D] dark:text-[#2CAC7F] shrink-0" />
             )}
-            <div className="flex flex-col sm:flex-row sm:items-baseline sm:gap-1.5">
-              <span className="text-xs sm:text-sm font-mono font-black text-[#076584] dark:text-[#77C86F] tracking-wider">
-                {profile.uniqueId}
+            <div className="flex flex-col sm:flex-row sm:items-baseline sm:gap-1.5 min-w-0">
+              <span
+                className="text-xs sm:text-sm font-bold text-[#076584] dark:text-[#77C86F] tracking-tight truncate max-w-[130px] sm:max-w-[200px]"
+                title={activeDisplayName || profile.uniqueId}
+              >
+                {activeDisplayName || profile.uniqueId}
               </span>
               <span className="text-[10px] font-bold text-[#537783] dark:text-slate-400 capitalize hidden sm:inline">
                 ({profile.role})
@@ -110,14 +117,14 @@ export function Navbar({ onOpenProfile }: NavbarProps) {
           <button
             type="button"
             onClick={onOpenProfile}
-            className="w-11 h-11 rounded-full bg-[#DDF2F0] dark:bg-slate-900 hover:border-[#0EA6B7] border-2 border-[#DCEAEC] dark:border-slate-800 flex items-center justify-center text-[#076584] dark:text-[#0EA6B7] shadow-xs transition-all touch-target active:scale-95 overflow-hidden"
-            title={`Profile & Settings: ${profile.name}`}
+            className="w-11 h-11 rounded-full bg-[#DDF2F0] dark:bg-slate-900 hover:border-[#0EA6B7] border-2 border-[#DCEAEC] dark:border-slate-800 flex items-center justify-center text-[#076584] dark:text-[#0EA6B7] shadow-xs transition-all touch-target active:scale-95 overflow-hidden cursor-pointer"
+            title={`Profile & Settings: ${activeDisplayName || profile.name}`}
             aria-label="User Profile and Settings"
           >
             {profile.userProfilePic ? (
               <img
                 src={profile.userProfilePic}
-                alt={profile.name}
+                alt={activeDisplayName || profile.name}
                 className="w-full h-full object-cover"
               />
             ) : (

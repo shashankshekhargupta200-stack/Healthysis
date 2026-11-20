@@ -1,6 +1,5 @@
-const minCompressionSize = 200 * 1024;
-const maxImageWidth = 1024;
-const jpegQuality = 0.75;
+const maxImageWidth = 768;
+const jpegQuality = 0.70;
 
 function loadImage(file: File): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
@@ -31,12 +30,18 @@ function canvasToJpeg(canvas: HTMLCanvasElement): Promise<Blob> {
 }
 
 export async function compressImage(file: File): Promise<File> {
-  if (!file.type.startsWith("image/") || file.size < minCompressionSize) return file;
+  if (!file.type.startsWith("image/")) return file;
 
   const image = await loadImage(file);
   if (image.naturalWidth === 0 || image.naturalHeight === 0) {
     throw new Error("The selected image has invalid dimensions.");
   }
+
+  // If already a small JPEG with width <= 768 and size under 120 KB, return as is
+  if (file.type === "image/jpeg" && image.naturalWidth <= maxImageWidth && file.size <= 120 * 1024) {
+    return file;
+  }
+
   const scale = Math.min(1, maxImageWidth / image.naturalWidth);
   const width = Math.max(1, Math.round(image.naturalWidth * scale));
   const height = Math.max(1, Math.round(image.naturalHeight * scale));

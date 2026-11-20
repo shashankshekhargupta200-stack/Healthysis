@@ -3,8 +3,10 @@
 import React, { useEffect, useState } from "react";
 import { AlertTriangle, Clock } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
+import { usePulse } from "@/context/PulseContext";
 import { getSupabaseClient, requireAuthenticatedUser } from "@/lib/supabase";
 import { isNetworkError, readUserLocalData } from "@/lib/localUserData";
+import { DailyLogSection } from "@/components/DailyLogSection";
 import { ClinicalCopilotChat } from "@/components/ClinicalCopilotChat";
 
 interface MealLog {
@@ -21,7 +23,9 @@ interface MealLog {
 
 export function HomeTabView() {
   const { user, session } = useAuth();
+  const { profile, healthResume } = usePulse();
   const userId = user?.id;
+  const displayName = profile?.name || healthResume?.fullName || user?.name || "User";
   const [meals, setMeals] = useState<MealLog[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -72,7 +76,7 @@ export function HomeTabView() {
     <div className="mx-auto w-full max-w-5xl space-y-8 animate-in fade-in duration-200">
       <section className="rounded-3xl bg-healthysis-signature p-8 text-center text-white shadow-xl">
         <p className="text-xs font-extrabold uppercase tracking-wider text-teal-50">Personal health dashboard</p>
-        <h1 className="mt-3 text-3xl font-black sm:text-4xl">Welcome, {user?.name ?? ""}</h1>
+        <h1 className="mt-3 text-3xl font-black sm:text-4xl">Welcome, {displayName}</h1>
         <p className="mx-auto mt-3 max-w-2xl text-sm text-teal-50">
           Your dashboard reflects only meal records saved to your profile.
         </p>
@@ -102,6 +106,8 @@ export function HomeTabView() {
           </p>
         </article>
       </section>
+
+      <DailyLogSection />
 
       <ClinicalCopilotChat />
     </div>

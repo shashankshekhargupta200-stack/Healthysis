@@ -75,16 +75,49 @@ export async function POST(request: Request) {
     return Response.json({ error: "Meal analysis is not configured. Please try again later." }, { status: 500 });
   }
 
+  const abortController = new AbortController();
+  const timeoutId = setTimeout(() => abortController.abort(), 15000);
+
   try {
     const client = new GoogleGenerativeAI(apiKey);
-    const model = client.getGenerativeModel({
-      model: "gemini-3.5-flash",
-      generationConfig: { responseMimeType: "application/json" }
-    });
-    const result = await model.generateContent([
-      { inlineData: { data: image, mimeType } },
-      prompt
-    ]);
+    const candidateModels = ["gemini-3.5-flash"] as const;
+    let result: { response: { text: () => string } } | null = null;
+    let lastError: unknown;
+
+    for (const modelName of candidateModels) {
+      if (abortController.signal.aborted) break;
+      try {
+        const model = client.getGenerativeModel({
+          model: modelName,
+          generationConfig: {
+            responseMimeType: "application/json",
+            ...({ thinkingConfig: { thinkingBudget: 0 } } as Record<string, unknown>)
+          } as Record<string, unknown>
+        });
+        result = await model.generateContent(
+          [
+            { inlineData: { data: image, mimeType } },
+            prompt
+          ],
+          { signal: abortController.signal, timeout: 15000 }
+        );
+        break;
+      } catch (err: unknown) {
+        if (abortController.signal.aborted) {
+          lastError = new Error("Meal analysis timed out after 15 seconds.");
+          break;
+        }
+        lastError = err;
+        console.warn(`Meal model ${modelName} failed; attempting fallback.`, err);
+      }
+    }
+
+    if (!result) {
+      if (abortController.signal.aborted) {
+        return Response.json({ error: "Meal analysis timed out after 15 seconds. Please try again." }, { status: 504 });
+      }
+      throw lastError instanceof Error ? lastError : new Error("Meal analysis service unavailable.");
+    }
 
     let analysis: unknown;
     try {
@@ -106,8 +139,13 @@ export async function POST(request: Request) {
       carbs: analysis.carbs,
       fats: analysis.fats
     });
-  } catch {
-    console.error("Gemini meal analysis request failed.");
-    return Response.json({ error: "Meal analysis failed. Please try again." }, { status: 502 });
+  } catch (error: unknown) {
+    console.error("Gemini meal analysis request failed.", error);
+    const message = abortController.signal.aborted
+      ? "Meal analysis timed out after 15 seconds. Please try again."
+      : error instanceof Error ? error.message : "Meal analysis failed. Please try again.";
+    return Response.json({ error: message }, { status: abortController.signal.aborted ? 504 : 502 });
+  } finally {
+    clearTimeout(timeoutId);
   }
 }

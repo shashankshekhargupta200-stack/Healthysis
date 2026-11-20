@@ -4,12 +4,27 @@ import React from "react";
 import { Stethoscope, CheckCircle2 } from "lucide-react";
 import { usePulse } from "@/context/PulseContext";
 import { doctorsList } from "@/lib/doctorsData";
+import { DoctorProfile } from "@/types";
 
-export function InfiniteDoctorCarousel({ className = "" }: { className?: string }) {
-  const { setActiveTab } = usePulse();
+interface InfiniteDoctorCarouselProps {
+  className?: string;
+  doctors?: DoctorProfile[];
+  cityName?: string;
+}
 
+export function InfiniteDoctorCarousel({
+  className = "",
+  doctors,
+  cityName
+}: InfiniteDoctorCarouselProps) {
+  const { setActiveTab, doctorsList: contextDoctors } = usePulse();
+  const sourceDoctors = doctors ?? contextDoctors;
+
+  if (sourceDoctors.length === 0) return null;
+
+  const displayCity = cityName || sourceDoctors[0]?.city || "Clinical";
   // Duplicate items array so translateX(-50%) produces a seamless, gapless infinite loop
-  const doubledDoctors = [...doctorsList, ...doctorsList];
+  const doubledDoctors = [...sourceDoctors, ...sourceDoctors];
 
   return (
     <div className={`w-full bg-white dark:bg-slate-900 border border-[#DCEAEC] dark:border-slate-800 rounded-3xl p-5 shadow-xs space-y-3 overflow-hidden transition-colors duration-200 ${className}`}>
@@ -21,14 +36,14 @@ export function InfiniteDoctorCarousel({ className = "" }: { className?: string 
           </div>
           <div>
             <h3 className="text-sm sm:text-base font-black text-[#123F55] dark:text-slate-100 tracking-tight flex items-center gap-2">
-              <span>Prayagraj Clinical Specialists ({doctorsList.length} Doctors)</span>
+              <span>Verified Clinical Specialists ({sourceDoctors.length} Doctors • {displayCity})</span>
               <span className="hidden sm:inline-flex items-center gap-1 text-[11px] font-extrabold text-[#076584] dark:text-[#77C86F] bg-[#DDF2F0] dark:bg-slate-800 px-2 py-0.5 rounded-full border border-[#DCEAEC] dark:border-slate-700">
                 <CheckCircle2 className="w-3 h-3 text-[#2CAC7F]" />
                 Live on Healthysis
               </span>
             </h3>
             <p className="text-[11px] text-[#537783] dark:text-slate-400 font-medium">
-              Tap a listing for qualifications and clinic contact details.
+              Tap a listing for qualifications and clinic contact details in {displayCity}.
             </p>
           </div>
         </div>

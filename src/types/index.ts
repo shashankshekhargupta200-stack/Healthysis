@@ -75,6 +75,8 @@ export interface UserProfile {
   createdAt: string;
   isHidingCondition: boolean;
   gender?: string;
+  email?: string;
+  location?: string;
   userProfilePic?: string;
   bmi?: number;
   bmiCategory?: string;
@@ -128,6 +130,7 @@ export interface HealthDiagnosisItem {
   condition: string;
   details: string;
   status: "Resolved" | "Ongoing" | "Normal";
+  isDepartmentFocus?: boolean;
 }
 
 export interface HealthMedicationItem {
@@ -136,6 +139,7 @@ export interface HealthMedicationItem {
   dose: string;
   frequency: string;
   purpose: string;
+  isDepartmentFocus?: boolean;
 }
 
 export interface HealthAllergyItem {
@@ -150,6 +154,7 @@ export interface HealthTestReportItem {
   testName: string;
   result: string;
   file?: string;
+  isDepartmentFocus?: boolean;
 }
 
 export interface HealthImmunizationItem {
@@ -163,6 +168,7 @@ export interface HealthSurgeryItem {
   date: string;
   procedure: string;
   details: string;
+  isDepartmentFocus?: boolean;
 }
 
 export interface HealthResumeData {
@@ -239,5 +245,54 @@ export interface HealthResumeData {
     statement: string;
     patientSignature: string;
     signatureDate: string;
+  };
+
+  // Department Customization (Optional)
+  selectedDepartment?: DepartmentId;
+  departmentCustomization?: DepartmentCustomization;
+}
+
+export type DepartmentId =
+  | "all"
+  | "orthopedics"
+  | "dentistry"
+  | "cardiology"
+  | "neurology"
+  | "gastroenterology"
+  | "pulmonology"
+  | "nephrology"
+  | "urology"
+  | "dermatology"
+  | "ophthalmology"
+  | "otolaryngology"
+  | "endocrinology"
+  | "oncology"
+  | "psychiatry";
+
+export interface DetectedPatternItem {
+  id: string;
+  category: "trend" | "recurrent_symptom" | "diet_correlation" | "vital_trajectory" | "clinical_pearl" | string;
+  title: string;
+  observation: string;
+  relevance: string;
+  significance?: string;
+  severity?: "normal" | "notable" | "attention";
+}
+
+export interface DepartmentCustomization {
+  departmentId: DepartmentId;
+  departmentName: string;
+  departmentShortName: string;
+  departmentIcon?: string;
+  focusArea: string;
+  detectedPatterns: DetectedPatternItem[];
+  patternsDisclaimer: string;
+  disclaimer?: string;
+  primaryBiomarkers?: Array<{ name: string; value: string; status?: string }>;
+  crossDepartmentSafety?: {
+    allergiesSummary: string;
+    activeMedicationsSummary: string;
+    criticalNotes?: string[];
+    interactionAlerts?: string[];
   };
 }

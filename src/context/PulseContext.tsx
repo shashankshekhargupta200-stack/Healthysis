@@ -113,9 +113,11 @@ export function PulseProvider({ children }: { children: ReactNode }) {
     if (typeof window === "undefined") return;
 
     const params = new URLSearchParams(window.location.search);
-    let tabParam = params.get("tab") as NavigationTab | null;
-    if (tabParam === "doctor-brief") tabParam = "healthfolio";
-    if (tabParam === "truth-engine") tabParam = "user-profile";
+    const rawTab = params.get("tab");
+    let tabParam: NavigationTab | null = null;
+    if (rawTab === "doctor-brief") tabParam = "healthfolio";
+    else if (rawTab === "truth-engine" || rawTab === "profile" || rawTab === "user-profile") tabParam = "user-profile";
+    else if (rawTab && VALID_TABS.includes(rawTab as NavigationTab)) tabParam = rawTab as NavigationTab;
 
     if (tabParam && VALID_TABS.includes(tabParam)) {
       setTimeout(() => setActiveTabState(tabParam as NavigationTab), 0);
@@ -129,9 +131,11 @@ export function PulseProvider({ children }: { children: ReactNode }) {
 
     const handlePopState = (event: PopStateEvent) => {
       const currentParams = new URLSearchParams(window.location.search);
-      let poppedTab = currentParams.get("tab") as NavigationTab | null;
-      if (poppedTab === "doctor-brief") poppedTab = "healthfolio";
-      if (poppedTab === "truth-engine") poppedTab = "user-profile";
+      const rawPopped = currentParams.get("tab");
+      let poppedTab: NavigationTab | null = null;
+      if (rawPopped === "doctor-brief") poppedTab = "healthfolio";
+      else if (rawPopped === "truth-engine" || rawPopped === "profile" || rawPopped === "user-profile") poppedTab = "user-profile";
+      else if (rawPopped && VALID_TABS.includes(rawPopped as NavigationTab)) poppedTab = rawPopped as NavigationTab;
 
       if (poppedTab && VALID_TABS.includes(poppedTab)) {
         setActiveTabState(poppedTab);

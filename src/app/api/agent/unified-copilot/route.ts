@@ -6,9 +6,7 @@ const maxImageBytes = 8 * 1024 * 1024;
 const maxMessageLength = 4000;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const candidateModels = [
-  "gemini-3.5-flash",
-  "gemini-3.5-pro",
-  "gemini-3.0-flash"
+  "gemini-3.5-flash"
 ] as const;
 
 type Biomarker = {
@@ -122,19 +120,25 @@ function isModelNotFoundError(error: unknown): boolean {
 
 async function generateWithFallback(
   apiKey: string,
-  promptOrParts: string | Array<string | Part>
+  promptOrParts: string | Array<string | Part>,
+  signal?: AbortSignal
 ): Promise<GenerateContentResult> {
   const client = new GoogleGenerativeAI(apiKey);
   let lastModelError: unknown;
 
   for (const modelName of candidateModels) {
+    if (signal?.aborted) throw new Error("Request aborted.");
     try {
       const model = client.getGenerativeModel({
         model: modelName,
-        generationConfig: { responseMimeType: "application/json" }
+        generationConfig: {
+          responseMimeType: "application/json",
+          ...({ thinkingConfig: { thinkingBudget: 0 } } as Record<string, unknown>)
+        } as Record<string, unknown>
       });
-      return await model.generateContent(promptOrParts);
+      return await model.generateContent(promptOrParts, { signal, timeout: 15000 });
     } catch (error: unknown) {
+      if (signal?.aborted) throw error;
       if (!isModelNotFoundError(error)) throw error;
       lastModelError = error;
       console.warn(`Gemini model ${modelName} was not found; trying the next candidate.`);

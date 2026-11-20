@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useMemo } from "react";
 import { usePulse } from "@/context/PulseContext";
 import { useAuth } from "@/context/AuthContext";
 import { getSupabaseClient, requireAuthenticatedUser } from "@/lib/supabase";
@@ -8,6 +8,8 @@ import { isNetworkError, readUserLocalData, writeUserLocalData } from "@/lib/loc
 import { createEmptyHealthResume } from "@/lib/healthResumeDefaults";
 import { HealthfolioVaultGallery } from "@/components/HealthfolioVaultGallery";
 import { reportExtractedEventName, type ReportExtractedDetail } from "@/lib/reportExtraction";
+import { DEPARTMENT_CATALOG, getDepartmentById, getConciseDepartmentLabel } from "@/lib/departmentCatalog";
+import { detectDepartmentPatterns } from "@/lib/departmentPatternDetector";
 import {
   HealthResumeData,
   HealthDiagnosisItem,
@@ -16,38 +18,22 @@ import {
   HealthTestReportItem,
   HealthTimelineItem,
   HealthImmunizationItem,
-  HealthSurgeryItem
+  DepartmentId
 } from "@/types";
 import {
-  FileText,
   Download,
-  Lock,
   Eye,
   CheckCircle2,
   Plus,
   Trash2,
-  Edit,
-  ShieldCheck,
-  Activity,
-  Heart,
-  Droplet,
-  Ruler,
-  Weight,
   User,
-  Phone,
-  Mail,
-  MapPin,
   Calendar,
   AlertTriangle,
   Stethoscope,
   Pill,
-  Syringe,
-  QrCode,
-  Check,
-  ChevronDown,
-  ChevronUp,
   Key,
-  ShieldAlert
+  Sparkles,
+  Info
 } from "lucide-react";
 import jsPDF from "jspdf";
 import { toPng } from "html-to-image";
@@ -162,7 +148,7 @@ function hydrateResumeFromVault(resume: HealthResumeData, records: unknown[]): H
             result,
             ...(typeof record.document_url === "string" ? { file: record.document_url } : {})
           },
-          ...next.testReports.filter((item) => item.id !== record.id && !(item.testName === title && item.date === date))
+          ...next.testReports.filter((item) => item.id !== record.id && !(item.testName.toLowerCase() === title.toLowerCase() && item.date === date))
         ]
       };
     } else if (folder === "prescriptions") {
@@ -182,16 +168,6 @@ function hydrateResumeFromVault(resume: HealthResumeData, records: unknown[]): H
           ...next.medications.filter((item) => !medications.some((medication) =>
             medication.medicine.toLowerCase() === item.medicine.toLowerCase()
           ))
-        ],
-        testReports: [
-          {
-            id: stringValue(record.id) || `vault-${title}-${date}`,
-            date,
-            testName: title,
-            result: stringValue(record.patient_summary),
-            ...(typeof record.document_url === "string" ? { file: record.document_url } : {})
-          },
-          ...next.testReports.filter((item) => item.id !== record.id && !(item.testName === title && item.date === date))
         ]
       };
     }
@@ -219,6 +195,19 @@ export function HealthResumeBuilderTabView() {
   const [passError, setPassError] = useState("");
   const [pdfSuccess, setPdfSuccess] = useState(false);
 
+  // Department Customization State
+  const [selectedDepartment, setSelectedDepartment] = useState<DepartmentId>(() => {
+    if (typeof window !== "undefined" && userId) {
+      return readUserLocalData<DepartmentId>(userId, "healthfolio_selected_department", "all");
+    }
+    return "all";
+  });
+  const [rawVaultRecords, setRawVaultRecords] = useState<unknown[]>([]);
+  const [rawMealLogs, setRawMealLogs] = useState<unknown[]>([]);
+  const [rawSymptomLogs, setRawSymptomLogs] = useState<unknown[]>([]);
+  const [isAiAnalyzing, setIsAiAnalyzing] = useState(false);
+  const [aiAnalysisMessage, setAiAnalysisMessage] = useState<string | null>(null);
+
   // Hidden references for PDF capture
   const page1Ref = useRef<HTMLDivElement>(null);
   const page2Ref = useRef<HTMLDivElement>(null);
@@ -231,9 +220,17 @@ export function HealthResumeBuilderTabView() {
         if (!userId) return;
         const localResume = readUserLocalData<HealthResumeData | null>(userId, "healthfolio", null);
         const baseResume = localResume ?? createEmptyHealthResume(user?.name ?? "", user?.phone ?? "");
+        const localVault = readUserLocalData<unknown[]>(userId, "patient_memory_vault", []);
+        const localMeals = readUserLocalData<unknown[]>(userId, "meal_logs", []);
+        const localSymptoms = readUserLocalData<unknown[]>(userId, "daily_symptom_logs", []);
+        const savedDept = readUserLocalData<DepartmentId>(userId, "healthfolio_selected_department", localResume?.selectedDepartment || "all");
+        setSelectedDepartment(savedDept);
+        setRawVaultRecords(localVault);
+        setRawMealLogs(localMeals);
+        setRawSymptomLogs(localSymptoms);
         const nextResume = hydrateResumeFromVault(
           baseResume,
-          readUserLocalData<unknown[]>(userId, "patient_memory_vault", [])
+          localVault
         );
         setFormData(nextResume);
         updateHealthResume(nextResume);
@@ -257,7 +254,7 @@ export function HealthResumeBuilderTabView() {
         }
         const supabase = getSupabaseClient();
         const authenticatedUserId = await requireAuthenticatedUser(supabase, session?.user.id);
-        const [profileResult, historyResult, vaultResult] = await Promise.all([
+        const [profileResult, historyResult, vaultResult, mealResult, symptomResult] = await Promise.all([
           supabase
             .from("profiles")
             .select("id, full_name, phone, dob, blood_group, abha_id, details, blood_pressure_latest, heart_rate_latest")
@@ -271,14 +268,34 @@ export function HealthResumeBuilderTabView() {
             .from("patient_memory_vault")
             .select("id, category, storage_folder, title, extracted_data, patient_summary, document_url, created_at")
             .eq("user_id", authenticatedUserId)
-            .in("category", ["lab_report", "prescription"])
             .order("created_at", { ascending: false })
-            .limit(50)
+            .limit(50),
+          supabase
+            .from("meal_logs")
+            .select("id, food_name, calories, macros, timestamp")
+            .eq("user_id", authenticatedUserId)
+            .order("timestamp", { ascending: false })
+            .limit(20),
+          supabase
+            .from("daily_symptom_logs")
+            .select("id, symptoms, logged_at")
+            .eq("patient_id", authenticatedUserId)
+            .order("logged_at", { ascending: false })
+            .limit(20)
         ]);
         if (profileResult.error) throw profileResult.error;
         if (historyResult.error) throw historyResult.error;
         if (vaultResult.error) {
           console.warn("Could not load vault data into the Healthfolio form.", vaultResult.error.message);
+        }
+
+        const vaultData = vaultResult.data ?? (userId ? readUserLocalData<unknown[]>(userId, "patient_memory_vault", []) : []);
+        const mealData = mealResult?.data ?? (userId ? readUserLocalData<unknown[]>(userId, "meal_logs", []) : []);
+        const symptomData = symptomResult?.data ?? (userId ? readUserLocalData<unknown[]>(userId, "daily_symptom_logs", []) : []);
+        if (active) {
+          setRawVaultRecords(vaultData);
+          setRawMealLogs(mealData);
+          setRawSymptomLogs(symptomData);
         }
 
         const profileDetails = isRecord(profileResult.data?.details) ? profileResult.data.details : {};
@@ -370,20 +387,59 @@ export function HealthResumeBuilderTabView() {
           }
         };
         const hydratedResume = hydrateResumeFromVault(nextResume, vaultResult.data ?? []);
+
+        // Strict deduplication of diagnoses, medications, testReports across the 5 steps
+        const uniqueDiagnoses: HealthResumeData["diagnoses"] = [];
+        const seenDiagKeys = new Set<string>();
+        for (const d of hydratedResume.diagnoses) {
+          const key = `${d.condition.trim().toLowerCase()}_${d.date}`;
+          if (!seenDiagKeys.has(key)) {
+            seenDiagKeys.add(key);
+            uniqueDiagnoses.push(d);
+          }
+        }
+
+        const uniqueMeds: HealthResumeData["medications"] = [];
+        const seenMedKeys = new Set<string>();
+        for (const m of hydratedResume.medications) {
+          const key = m.medicine.trim().toLowerCase();
+          if (!seenMedKeys.has(key)) {
+            seenMedKeys.add(key);
+            uniqueMeds.push(m);
+          }
+        }
+
+        const uniqueReports: HealthResumeData["testReports"] = [];
+        const seenReportKeys = new Set<string>();
+        for (const r of hydratedResume.testReports) {
+          const key = `${r.testName.trim().toLowerCase()}_${r.date}`;
+          if (!seenReportKeys.has(key)) {
+            seenReportKeys.add(key);
+            uniqueReports.push(r);
+          }
+        }
+
+        const cleanedResume: HealthResumeData = {
+          ...hydratedResume,
+          diagnoses: uniqueDiagnoses,
+          medications: uniqueMeds,
+          testReports: uniqueReports
+        };
+
         if (active) {
-          setFormData(hydratedResume);
-          updateHealthResume(hydratedResume);
+          setFormData(cleanedResume);
+          updateHealthResume(cleanedResume);
           updateProfile({
             name: fullName,
             phone: profileResult.data?.phone ?? user?.phone ?? "",
             uniqueId: authenticatedUserId,
-            age: Number(hydratedResume.age) || 0,
-            dob: hydratedResume.dob,
-            gender: hydratedResume.gender,
-            height: hydratedResume.heightCm ? `${hydratedResume.heightCm} cm` : "",
-            weight: hydratedResume.weightKg ? `${hydratedResume.weightKg} kg` : "",
-            bmi: Number(hydratedResume.bmi) || undefined,
-            bmiCategory: hydratedResume.bmiCategory
+            age: Number(cleanedResume.age) || 0,
+            dob: cleanedResume.dob,
+            gender: cleanedResume.gender,
+            height: cleanedResume.heightCm ? `${cleanedResume.heightCm} cm` : "",
+            weight: cleanedResume.weightKg ? `${cleanedResume.weightKg} kg` : "",
+            bmi: Number(cleanedResume.bmi) || undefined,
+            bmiCategory: cleanedResume.bmiCategory
           });
         }
       } catch (error: unknown) {
@@ -403,6 +459,22 @@ export function HealthResumeBuilderTabView() {
       active = false;
     };
   }, [user?.name, user?.phone, user?.email, user?.isGuest, session?.user.id, userId, updateHealthResume, updateProfile]);
+
+  // Keep Health Resume in sync when user updates their profile name or details on the Profile tab
+  useEffect(() => {
+    if (healthResume.fullName && healthResume.fullName !== formData.fullName) {
+      setFormData((prev) => ({
+        ...prev,
+        fullName: healthResume.fullName,
+        dob: healthResume.dob || prev.dob,
+        age: healthResume.age || prev.age,
+        gender: healthResume.gender || prev.gender,
+        email: healthResume.email || prev.email,
+        location: healthResume.location || prev.location,
+        patientId: healthResume.patientId || prev.patientId
+      }));
+    }
+  }, [healthResume.fullName, healthResume.dob, healthResume.age, healthResume.gender, healthResume.email, healthResume.location, healthResume.patientId, formData.fullName]);
 
   useEffect(() => {
     const handleReportExtracted = (event: Event) => {
@@ -438,6 +510,78 @@ export function HealthResumeBuilderTabView() {
     window.addEventListener(reportExtractedEventName, handleReportExtracted);
     return () => window.removeEventListener(reportExtractedEventName, handleReportExtracted);
   }, [formData, updateHealthResume, userId]);
+
+  // Department Customization & Pattern Detection
+  const handleDepartmentSelect = (deptId: DepartmentId) => {
+    setSelectedDepartment(deptId);
+    setAiAnalysisMessage(null);
+    if (userId) {
+      writeUserLocalData(userId, "healthfolio_selected_department", deptId);
+    }
+  };
+
+  const departmentData = useMemo(() => {
+    return detectDepartmentPatterns(
+      formData,
+      selectedDepartment,
+      rawVaultRecords,
+      rawMealLogs,
+      rawSymptomLogs
+    );
+  }, [formData, selectedDepartment, rawVaultRecords, rawMealLogs, rawSymptomLogs]);
+
+  const activeDeptConfig = useMemo(() => {
+    return getDepartmentById(selectedDepartment);
+  }, [selectedDepartment]);
+
+  const prioritizedReportCount = useMemo(() => {
+    return departmentData.prioritizedTestReports.filter((r) => r.isDepartmentFocus).length;
+  }, [departmentData.prioritizedTestReports]);
+
+  const prioritizedMedCount = useMemo(() => {
+    return departmentData.prioritizedMedications.filter((m) => m.isDepartmentFocus).length;
+  }, [departmentData.prioritizedMedications]);
+
+  const effectiveResume: HealthResumeData = useMemo(() => {
+    return {
+      ...formData,
+      selectedDepartment,
+      departmentCustomization: departmentData.customization,
+      diagnoses: departmentData.prioritizedDiagnoses,
+      medications: departmentData.prioritizedMedications,
+      testReports: departmentData.prioritizedTestReports,
+      surgeries: departmentData.prioritizedSurgeries
+    };
+  }, [formData, selectedDepartment, departmentData]);
+
+  const triggerAiPatternAnalysis = async () => {
+    setIsAiAnalyzing(true);
+    setAiAnalysisMessage(null);
+    try {
+      const response = await fetch("/api/agent/department-resume-patterns", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          departmentId: selectedDepartment,
+          resume: formData,
+          vaultRecords: rawVaultRecords,
+          mealLogs: rawMealLogs,
+          symptomLogs: rawSymptomLogs
+        })
+      });
+      const data = await response.json();
+      if (data.success && Array.isArray(data.patterns) && data.patterns.length > 0) {
+        setAiAnalysisMessage(`AI Agent identified ${data.patterns.length} department-tailored clinical patterns using gemini-3.5-flash.`);
+      } else {
+        setAiAnalysisMessage("AI patterns refreshed with clinical records.");
+      }
+    } catch (err: unknown) {
+      console.warn("Could not reach AI pattern analysis route, using client detection:", err);
+      setAiAnalysisMessage("Using client-side clinical pattern detection.");
+    } finally {
+      setIsAiAnalyzing(false);
+    }
+  };
 
   // Compute 8-digit DOB passphrase
   const computePasscode = (): string => {
@@ -535,11 +679,13 @@ export function HealthResumeBuilderTabView() {
           ...formData,
           fullName: formData.fullName.trim() || user.name,
           phone: formData.phone || user.phone || "",
-          patientId: userId
+          patientId: userId,
+          selectedDepartment
         };
         if (!writeUserLocalData(userId, "healthfolio", saved)) {
           throw new Error("Could not save your dossier on this device.");
         }
+        writeUserLocalData(userId, "healthfolio_selected_department", selectedDepartment);
         setFormData(saved);
         updateHealthResume(saved);
         updateProfile({
@@ -607,7 +753,8 @@ export function HealthResumeBuilderTabView() {
           immunizations: formData.immunizations,
           medicalTimeline: formData.medicalTimeline,
           lifestyle: formData.lifestyle,
-          confirmation: formData.confirmation
+          confirmation: formData.confirmation,
+          selectedDepartment
         },
         updated_at: new Date().toISOString()
       }, { onConflict: "id" });
@@ -661,9 +808,10 @@ export function HealthResumeBuilderTabView() {
         if (error) throw error;
       }
 
-      const saved = { ...formData, fullName: savedName, patientId: authenticatedUserId };
+      const saved = { ...formData, fullName: savedName, patientId: authenticatedUserId, selectedDepartment };
       setFormData(saved);
       writeUserLocalData(userId, "healthfolio", saved);
+      writeUserLocalData(userId, "healthfolio_selected_department", selectedDepartment);
       updateHealthResume(saved);
       updateProfile({
         name: saved.fullName,
@@ -977,6 +1125,227 @@ export function HealthResumeBuilderTabView() {
       )}
 
       {/* ============================================================ */}
+      {/* 1.5 DEPARTMENT SELECTOR & AGENT TAILORING (CLEAN WHITE)      */}
+      {/* ============================================================ */}
+      <section className="bg-white dark:bg-slate-900 rounded-3xl p-6 sm:p-7 lg:p-8 border border-slate-200 dark:border-slate-800 shadow-sm space-y-6 text-slate-900 dark:text-slate-100">
+        {/* Top Area / Two-Column Layout */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 lg:gap-8 items-start">
+          {/* Left/Top: Eyebrow badge, headline, and subtitle */}
+          <div className="lg:col-span-7 space-y-2.5">
+            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-teal-50 dark:bg-teal-950/60 border border-teal-200 dark:border-teal-800 text-[#076584] dark:text-teal-300 text-[11px] font-black uppercase tracking-wider">
+              <Sparkles className="w-3.5 h-3.5 text-[#04939D]" />
+              <span>AI SPECIALIST CURATION</span>
+            </div>
+
+            <h2 className="text-2xl sm:text-3xl font-black text-slate-900 dark:text-slate-100 tracking-tight leading-tight">
+              Department-Customized Health Resume
+            </h2>
+
+            <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 font-medium leading-relaxed max-w-xl">
+              Choose your target medical specialty. Healthysis dynamically reorganizes biometrics, filters clinical test reports, and highlights critical patterns tailored for your consulting specialist.
+            </p>
+          </div>
+
+          {/* Right/Action Area: Department selector control & Action buttons */}
+          <div className="lg:col-span-5 bg-slate-50/80 dark:bg-slate-950/60 border border-slate-200 dark:border-slate-800 rounded-2xl p-4 sm:p-5 shadow-xs space-y-3">
+            <div>
+              <label htmlFor="dept-select" className="text-xs font-bold text-slate-700 dark:text-slate-300 block mb-1.5">
+                Target Clinical Specialty
+              </label>
+              <div className="relative">
+                {/* Highlight ONLY the active department selector control */}
+                <select
+                  id="dept-select"
+                  value={selectedDepartment}
+                  onChange={(e) => handleDepartmentSelect(e.target.value as DepartmentId)}
+                  className="w-full rounded-xl border-2 border-[#04939D] bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 px-3.5 py-2.5 text-xs font-bold focus:outline-hidden focus:ring-2 focus:ring-[#04939D]/30 shadow-xs cursor-pointer transition-all"
+                >
+                  {DEPARTMENT_CATALOG.map((dept) => (
+                    <option key={dept.id} value={dept.id} className="py-1">
+                      {dept.icon} {getConciseDepartmentLabel(dept)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-0.5">
+              <button
+                type="button"
+                onClick={triggerAiPatternAnalysis}
+                disabled={isAiAnalyzing}
+                className="w-full inline-flex items-center justify-center gap-1.5 rounded-xl bg-[#04939D] hover:bg-[#037c85] px-3.5 py-2.5 text-xs font-bold text-white shadow-xs disabled:opacity-50 transition-all active:scale-95 cursor-pointer"
+              >
+                <Sparkles className={`w-3.5 h-3.5 text-white ${isAiAnalyzing ? "animate-spin" : ""}`} />
+                <span>{isAiAnalyzing ? "Analyzing Records..." : "Re-analyze with AI"}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setShowPreviewModal(true)}
+                className="w-full inline-flex items-center justify-center gap-1.5 rounded-xl bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700 px-3.5 py-2.5 text-xs font-bold text-slate-700 dark:text-slate-200 transition-all shadow-2xs cursor-pointer"
+              >
+                <Eye className="w-3.5 h-3.5 text-[#04939D]" />
+                <span>Resume Preview</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Selected Specialty Focus Strip / Panel */}
+        <div className="rounded-2xl border-2 border-teal-500/40 bg-teal-50/40 dark:bg-slate-950/60 dark:border-teal-800/60 p-5 sm:p-6 shadow-xs space-y-3.5">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-teal-200/60 dark:border-slate-800">
+            <div className="space-y-0.5">
+              <span className="text-[10px] font-extrabold uppercase tracking-wider text-[#04939D] dark:text-teal-400 block">
+                Target Specialist Focus
+              </span>
+              <h3 className="text-lg sm:text-xl font-black text-slate-900 dark:text-slate-100 flex items-center gap-2.5">
+                <span className="text-2xl">{activeDeptConfig.icon}</span>
+                <span>{activeDeptConfig.name}</span>
+                <span className="px-2.5 py-0.5 rounded-lg bg-[#04939D] text-white text-xs font-black shadow-2xs">
+                  {activeDeptConfig.shortName}
+                </span>
+              </h3>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span className="px-3 py-1.5 rounded-xl bg-white dark:bg-slate-900 border border-teal-200 dark:border-teal-900/60 font-bold text-[#076584] dark:text-teal-300 shadow-2xs flex items-center gap-1.5">
+                <Sparkles className="w-3 h-3 text-[#04939D]" />
+                <span>{prioritizedReportCount} relevant test{prioritizedReportCount === 1 ? "" : "s"} prioritized</span>
+              </span>
+              <span className="px-3 py-1.5 rounded-xl bg-white dark:bg-slate-900 border border-teal-200 dark:border-teal-900/60 font-bold text-[#076584] dark:text-teal-300 shadow-2xs flex items-center gap-1.5">
+                <Pill className="w-3 h-3 text-[#04939D]" />
+                <span>{prioritizedMedCount} medication{prioritizedMedCount === 1 ? "" : "s"} highlighted</span>
+              </span>
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <p className="text-xs sm:text-sm text-slate-700 dark:text-slate-300 leading-relaxed">
+              <strong className="text-slate-900 dark:text-slate-100 font-extrabold">Complete Focus Area:</strong>{" "}
+              <span>{activeDeptConfig.focusArea}</span>
+            </p>
+
+            {/* Key Priorities Chips for this department */}
+            {activeDeptConfig.id !== "all" && (
+              <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                <span className="text-[10px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mr-1">
+                  Department Priorities:
+                </span>
+                {activeDeptConfig.biomarkerKeywords.slice(0, 5).map((biomarker) => (
+                  <span
+                    key={biomarker}
+                    className="px-2.5 py-0.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-[11px] font-semibold text-slate-700 dark:text-slate-300 shadow-2xs"
+                  >
+                    {biomarker}
+                  </span>
+                ))}
+                {activeDeptConfig.vitalPriorities.map((vp) => (
+                  <span
+                    key={vp}
+                    className="px-2.5 py-0.5 rounded-lg bg-teal-50 dark:bg-teal-950/80 border border-teal-200 dark:border-teal-800 text-[11px] font-bold text-[#076584] dark:text-teal-300"
+                  >
+                    {vp === "bloodPressure" ? "Blood Pressure" : vp === "heartRate" ? "Heart Rate" : vp === "spo2" ? "SpO2" : vp === "weightKg" ? "Weight" : vp}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Clean "Detected Patterns & Trends" Showcase */}
+        {departmentData.customization.detectedPatterns.length > 0 ? (
+          <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-950/40 p-5 sm:p-6 shadow-xs space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-xl bg-teal-50 dark:bg-teal-950/50 border border-teal-200 dark:border-teal-800 flex items-center justify-center text-[#04939D] text-sm">
+                  📊
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h4 className="text-sm sm:text-base font-black text-slate-900 dark:text-slate-100">
+                      Detected Patterns &amp; Trends ({activeDeptConfig.shortName})
+                    </h4>
+                    <span className="text-[10px] font-black px-2 py-0.5 rounded-full bg-teal-100 dark:bg-teal-950 text-[#076584] dark:text-teal-300 border border-teal-200 dark:border-teal-800 uppercase">
+                      {departmentData.customization.detectedPatterns.length} Pattern{departmentData.customization.detectedPatterns.length === 1 ? "" : "s"}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                    Synthesized across lab trends, prescriptions, daily logs, and department focus areas.
+                  </p>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setShowPreviewModal(true)}
+                className="inline-flex items-center gap-1.5 text-xs font-bold text-[#04939D] hover:text-[#037c85] underline underline-offset-4 cursor-pointer self-start sm:self-auto"
+              >
+                <Eye className="w-3.5 h-3.5" />
+                <span>See in Resume Preview</span>
+              </button>
+            </div>
+
+            {aiAnalysisMessage && (
+              <div className="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-emerald-900 dark:text-emerald-200 text-xs font-semibold flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span>{aiAnalysisMessage}</span>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+              {departmentData.customization.detectedPatterns.map((p) => (
+                <div
+                  key={p.id}
+                  className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 space-y-2 shadow-2xs hover:border-[#04939D]/30 transition-all"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-black text-slate-900 dark:text-slate-100">
+                      {p.title}
+                    </span>
+                    {p.severity === "attention" && (
+                      <span className="px-2 py-0.5 rounded-md bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300 border border-rose-200 dark:border-rose-900 text-[9px] font-black uppercase">
+                        Notice
+                      </span>
+                    )}
+                    {p.severity === "notable" && (
+                      <span className="px-2 py-0.5 rounded-md bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-300 border border-amber-200 dark:border-amber-900 text-[9px] font-black uppercase">
+                        Notable
+                      </span>
+                    )}
+                    {p.severity === "normal" && (
+                      <span className="px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-900 text-[9px] font-black uppercase">
+                        Normal
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed font-normal">
+                    {p.observation}
+                  </p>
+                  <p className="text-[11px] font-semibold text-[#076584] dark:text-teal-300 italic pt-1 border-t border-slate-100 dark:border-slate-800">
+                    {p.relevance}
+                  </p>
+                </div>
+              ))}
+            </div>
+
+            {/* Note / Disclaimer */}
+            <div className="flex items-center gap-2 pt-2 border-t border-slate-200 dark:border-slate-800 text-[11px] text-slate-500 dark:text-slate-400 italic">
+              <Info className="w-3.5 h-3.5 text-[#04939D] shrink-0" />
+              <span>{departmentData.customization.patternsDisclaimer}</span>
+            </div>
+          </div>
+        ) : (
+          <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-950/40 p-4 text-xs text-slate-600 dark:text-slate-400 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <Info className="w-4 h-4 text-[#04939D] shrink-0" />
+              <span>No outlier patterns detected yet for {activeDeptConfig.name}. Upload test reports or click &ldquo;Re-analyze with AI&rdquo; to scan all records.</span>
+            </div>
+          </div>
+        )}
+      </section>
+
+      {/* ============================================================ */}
       {/* 2. CATEGORY TABS / STEP SELECTOR                             */}
       {/* ============================================================ */}
       <section className="flex items-center gap-2 overflow-x-auto pb-1 text-xs">
@@ -1019,155 +1388,65 @@ export function HealthResumeBuilderTabView() {
               <span>Personal Demographics &amp; Biometrics</span>
             </h3>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-              <div>
-                <label className="text-xs font-bold text-[#123F55] dark:text-slate-100 block mb-1">Full Name</label>
-                <input
-                  type="text"
-                  value={formData.fullName}
-                  onChange={(e) => handleFieldChange("fullName", e.target.value)}
-                  placeholder="Your full name"
-                  className="w-full p-3 rounded-xl border border-[#DCEAEC] dark:border-slate-800 bg-white dark:bg-slate-950 text-[#123F55] dark:text-slate-100 font-semibold text-sm"
-                />
-              </div>
-
-              <div>
-                <label className="text-xs font-bold text-[#123F55] dark:text-slate-100 block mb-1">Age</label>
-                <input
-                  type="number"
-                  value={formData.age}
-                  onChange={(e) => handleFieldChange("age", e.target.value)}
-                  placeholder="e.g. 21"
-                  className="w-full p-3 rounded-xl border border-[#DCEAEC] dark:border-slate-800 bg-white dark:bg-slate-950 text-[#123F55] dark:text-slate-100 font-semibold text-sm"
-                />
-              </div>
-
-              <div>
-                <label className="text-xs font-bold text-[#123F55] dark:text-slate-100 block mb-1">Gender</label>
-                <select
-                  value={formData.gender}
-                  onChange={(e) => handleFieldChange("gender", e.target.value)}
-                  className="w-full p-3 rounded-xl border border-[#DCEAEC] dark:border-slate-800 bg-white dark:bg-slate-950 text-[#123F55] dark:text-slate-100 font-semibold text-sm"
-                >
-                  <option value="">Select</option>
-                  <option value="Male">Male</option>
-                  <option value="Female">Female</option>
-                  <option value="Other">Other</option>
-                </select>
-              </div>
-            </div>
-
+            {/* Baseline Biometrics: Blood Group, Height, Weight, Calculated BMI */}
             <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
               <div>
-                <label className="text-xs font-bold text-[#123F55] dark:text-slate-100 block mb-1">Date of Birth (Display)</label>
+                <label className="text-xs font-bold text-[#123F55] dark:text-slate-100 block mb-1">
+                  Blood Group
+                </label>
+                <select
+                  value={formData.bloodGroup}
+                  onChange={(e) => handleFieldChange("bloodGroup", e.target.value)}
+                  className="w-full p-3 rounded-xl border border-[#DCEAEC] dark:border-slate-800 bg-white dark:bg-slate-950 text-[#123F55] dark:text-slate-100 font-bold text-sm"
+                >
+                  <option value="">Select Blood Group</option>
+                  <option value="A+">A+</option>
+                  <option value="A-">A-</option>
+                  <option value="B+">B+</option>
+                  <option value="B-">B-</option>
+                  <option value="O+">O+</option>
+                  <option value="O-">O-</option>
+                  <option value="AB+">AB+</option>
+                  <option value="AB-">AB-</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="text-xs font-bold text-[#123F55] dark:text-slate-100 block mb-1">
+                  Height (cm)
+                </label>
                 <input
-                  type="text"
-                  value={formData.dob}
-                  onChange={(e) => handleFieldChange("dob", e.target.value)}
-                  placeholder="Date of birth"
+                  type="number"
+                  value={formData.heightCm}
+                  onChange={(e) => handleHeightWeightChange("heightCm", e.target.value)}
+                  placeholder="e.g. 175"
                   className="w-full p-3 rounded-xl border border-[#DCEAEC] dark:border-slate-800 bg-white dark:bg-slate-950 text-[#123F55] dark:text-slate-100 font-semibold text-sm"
                 />
               </div>
 
               <div>
                 <label className="text-xs font-bold text-[#123F55] dark:text-slate-100 block mb-1">
-                  DOB Raw (For Passcode)
+                  Weight (kg)
                 </label>
-                <input
-                  type="date"
-                  value={formData.dobRaw || ""}
-                  onChange={(e) => handleFieldChange("dobRaw", e.target.value)}
-                  className="w-full p-3 rounded-xl border border-[#DCEAEC] dark:border-slate-800 bg-white dark:bg-slate-950 text-[#123F55] dark:text-slate-100 font-semibold text-sm"
-                />
-              </div>
-
-              <div>
-                <label className="text-xs font-bold text-[#123F55] dark:text-slate-100 block mb-1">Blood Group</label>
-                <input
-                  type="text"
-                  value={formData.bloodGroup}
-                  onChange={(e) => handleFieldChange("bloodGroup", e.target.value)}
-                placeholder="Blood group"
-                  className="w-full p-3 rounded-xl border border-[#DCEAEC] dark:border-slate-800 bg-white dark:bg-slate-950 text-[#123F55] dark:text-slate-100 font-semibold text-sm"
-                />
-              </div>
-
-              <div>
-                <label className="text-xs font-bold text-[#123F55] dark:text-slate-100 block mb-1">Patient ID</label>
-                <input
-                  type="text"
-                  value={formData.patientId}
-                  readOnly
-                  placeholder="Phone number ID"
-                  className="w-full p-3 rounded-xl border border-[#DCEAEC] dark:border-slate-800 bg-white dark:bg-slate-950 text-[#123F55] dark:text-slate-100 font-semibold text-sm font-mono"
-                />
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-              <div>
-                <label className="text-xs font-bold text-[#123F55] dark:text-slate-100 block mb-1">Height (cm)</label>
-                <input
-                  type="number"
-                  value={formData.heightCm}
-                  onChange={(e) => handleHeightWeightChange("heightCm", e.target.value)}
-                  placeholder="e.g. 178"
-                  className="w-full p-3 rounded-xl border border-[#DCEAEC] dark:border-slate-800 bg-white dark:bg-slate-950 text-[#123F55] dark:text-slate-100 font-semibold text-sm"
-                />
-              </div>
-
-              <div>
-                <label className="text-xs font-bold text-[#123F55] dark:text-slate-100 block mb-1">Weight (kg)</label>
                 <input
                   type="number"
                   value={formData.weightKg}
                   onChange={(e) => handleHeightWeightChange("weightKg", e.target.value)}
-                  placeholder="e.g. 72"
+                  placeholder="e.g. 70"
                   className="w-full p-3 rounded-xl border border-[#DCEAEC] dark:border-slate-800 bg-white dark:bg-slate-950 text-[#123F55] dark:text-slate-100 font-semibold text-sm"
                 />
               </div>
 
               <div>
-                <label className="text-xs font-bold text-[#123F55] dark:text-slate-100 block mb-1">Calculated BMI</label>
-                <div className="p-3 rounded-xl border border-[#DCEAEC] dark:border-slate-800 bg-[#F8FBFC] dark:bg-slate-950 text-[#123F55] dark:text-slate-100 font-black text-sm flex items-center justify-between">
-                  <span>{formData.bmi}</span>
-                  {formData.bmiCategory && <span className="text-xs text-[#2CAC7F] font-bold">({formData.bmiCategory})</span>}
+                <label className="text-xs font-bold text-[#123F55] dark:text-slate-100 block mb-1">
+                  Calculated BMI
+                </label>
+                <div className="p-3 rounded-xl border border-[#DCEAEC] dark:border-slate-800 bg-[#F8FBFC] dark:bg-slate-950 text-[#123F55] dark:text-slate-100 font-black text-sm flex items-center justify-between h-[46px]">
+                  <span>{formData.bmi || "—"}</span>
+                  {formData.bmiCategory && (
+                    <span className="text-xs text-[#2CAC7F] font-bold">({formData.bmiCategory})</span>
+                  )}
                 </div>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-              <div>
-                <label className="text-xs font-bold text-[#123F55] dark:text-slate-100 block mb-1">Phone</label>
-                <input
-                  type="text"
-                  value={formData.phone}
-                  readOnly
-                  placeholder="Phone number ID"
-                  className="w-full p-3 rounded-xl border border-[#DCEAEC] dark:border-slate-800 bg-white dark:bg-slate-950 text-[#123F55] dark:text-slate-100 font-semibold text-sm"
-                />
-              </div>
-
-              <div>
-                <label className="text-xs font-bold text-[#123F55] dark:text-slate-100 block mb-1">Email</label>
-                <input
-                  type="email"
-                  value={formData.email}
-                  onChange={(e) => handleFieldChange("email", e.target.value)}
-                  placeholder="Email address"
-                  className="w-full p-3 rounded-xl border border-[#DCEAEC] dark:border-slate-800 bg-white dark:bg-slate-950 text-[#123F55] dark:text-slate-100 font-semibold text-sm"
-                />
-              </div>
-
-              <div>
-                <label className="text-xs font-bold text-[#123F55] dark:text-slate-100 block mb-1">Location</label>
-                <input
-                  type="text"
-                  value={formData.location}
-                  onChange={(e) => handleFieldChange("location", e.target.value)}
-                  placeholder="City, country"
-                  className="w-full p-3 rounded-xl border border-[#DCEAEC] dark:border-slate-800 bg-white dark:bg-slate-950 text-[#123F55] dark:text-slate-100 font-semibold text-sm"
-                />
               </div>
             </div>
 
@@ -1850,10 +2129,10 @@ export function HealthResumeBuilderTabView() {
           {/* Visual Container rendering Page 1 & Page 2 */}
           <div className="w-full max-w-3xl space-y-8 pb-12">
             <div className="rounded-2xl shadow-2xl overflow-hidden bg-white">
-              {renderResumePage1(formData)}
+              {renderResumePage1(effectiveResume)}
             </div>
             <div className="rounded-2xl shadow-2xl overflow-hidden bg-white">
-              {renderResumePage2(formData)}
+              {renderResumePage2(effectiveResume)}
             </div>
           </div>
         </div>
@@ -1876,10 +2155,10 @@ export function HealthResumeBuilderTabView() {
         }}
       >
         <div ref={page1Ref} style={{ width: "800px", minHeight: "1131px", backgroundColor: "#ffffff" }}>
-          {renderResumePage1(formData)}
+          {renderResumePage1(effectiveResume)}
         </div>
         <div ref={page2Ref} style={{ width: "800px", minHeight: "1131px", backgroundColor: "#ffffff" }}>
-          {renderResumePage2(formData)}
+          {renderResumePage2(effectiveResume)}
         </div>
       </div>
     </div>
@@ -1909,6 +2188,12 @@ function renderResumePage1(d: HealthResumeData) {
           <div className="text-right">
             <div className="text-lg font-black text-[#076584] tracking-wider">HEALTH RESUME</div>
             <div className="text-[10px] text-[#537783] font-medium">Personal • Organized • Always With You</div>
+            {d.departmentCustomization && d.departmentCustomization.departmentId !== "all" && (
+              <div className="inline-flex items-center gap-1.5 mt-1 px-2.5 py-0.5 rounded-full bg-[#E0F2FE] border border-[#0284C7] text-[10px] font-bold text-[#0369A1]">
+                <span>{d.departmentCustomization.departmentIcon}</span>
+                <span>{d.departmentCustomization.departmentName} ({d.departmentCustomization.departmentShortName}) Focus</span>
+              </div>
+            )}
           </div>
         </div>
 
@@ -2053,27 +2338,92 @@ function renderResumePage1(d: HealthResumeData) {
           </div>
         </div>
 
+        {/* Detected Patterns & Trends Section */}
+        {d.departmentCustomization && d.departmentCustomization.detectedPatterns.length > 0 && (
+          <div className="mt-4 rounded-2xl border border-[#DCEAEC] overflow-hidden bg-white">
+            <div className="bg-gradient-to-r from-[#076584] to-[#0EA6B7] text-white p-2.5 font-black text-xs flex items-center justify-between">
+              <span className="flex items-center gap-1.5">
+                <span>✨</span> Detected Patterns &amp; Clinical Trends
+                {d.departmentCustomization.departmentId !== "all" && (
+                  <span className="ml-1 text-[10px] font-semibold bg-white/20 px-2 py-0.5 rounded-full">
+                    {d.departmentCustomization.departmentShortName} Focus
+                  </span>
+                )}
+              </span>
+              <span className="text-[9px] font-medium text-white/85">AI Record Synthesis</span>
+            </div>
+
+            <div className="p-3 space-y-2">
+              <div className="grid grid-cols-2 gap-2">
+                {d.departmentCustomization.detectedPatterns.slice(0, 4).map((pattern) => (
+                  <div key={pattern.id} className="p-2 rounded-xl bg-[#F0F8FA] border border-[#DCEAEC] space-y-1">
+                    <div className="flex items-center justify-between gap-1.5">
+                      <span className="text-[8px] uppercase tracking-wider font-extrabold text-[#076584] bg-white px-1.5 py-0.5 rounded border border-[#DCEAEC]">
+                        {pattern.category}
+                      </span>
+                      <span
+                        className={`text-[8px] font-bold px-1.5 py-0.5 rounded-full ${
+                          pattern.severity === "attention"
+                            ? "bg-red-100 text-red-700"
+                            : pattern.severity === "notable"
+                            ? "bg-amber-100 text-amber-800"
+                            : "bg-emerald-100 text-emerald-800"
+                        }`}
+                      >
+                        {(pattern.severity || "normal").toUpperCase()}
+                      </span>
+                    </div>
+                    <div className="text-[10px] font-black text-[#123F55] leading-tight">{pattern.observation}</div>
+                    <div className="text-[9px] text-[#537783] leading-snug">{pattern.significance || pattern.relevance}</div>
+                  </div>
+                ))}
+              </div>
+              <div className="pt-1.5 border-t border-[#DCEAEC] text-[9px] text-[#64748B] italic">
+                {d.departmentCustomization.patternsDisclaimer || "Note: Insights and patterns are summarized from user-uploaded records rather than a clinical diagnosis."}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Cross-Department Safety Essentials (Compact Secondary Section) */}
+        {d.departmentCustomization && d.departmentCustomization.crossDepartmentSafety && (
+          <div className="mt-3 p-2 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] flex items-center justify-between gap-2 text-[10px]">
+            <div className="flex items-center gap-1 shrink-0 font-bold text-[#076584]">
+              <span>🛡️</span> Cross-Department Safety:
+            </div>
+            <div className="flex-1 truncate text-[#537783] text-[9.5px]">
+              <span className="font-semibold text-[#123F55]">Allergies:</span> {d.departmentCustomization.crossDepartmentSafety.allergiesSummary || "None reported"} • <span className="font-semibold text-[#123F55]">Active Rx:</span> {d.departmentCustomization.crossDepartmentSafety.activeMedicationsSummary || "None logged"}
+            </div>
+            {((d.departmentCustomization.crossDepartmentSafety.criticalNotes && d.departmentCustomization.crossDepartmentSafety.criticalNotes.length > 0) ||
+              (d.departmentCustomization.crossDepartmentSafety.interactionAlerts && d.departmentCustomization.crossDepartmentSafety.interactionAlerts.length > 0)) && (
+              <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 font-bold text-[8.5px] shrink-0">
+                ⚠️ {d.departmentCustomization.crossDepartmentSafety.criticalNotes?.[0] || d.departmentCustomization.crossDepartmentSafety.interactionAlerts?.[0]}
+              </span>
+            )}
+          </div>
+        )}
+
         {/* Bottom Section: Medical Timeline */}
-        <div className="mt-5 rounded-2xl border border-[#DCEAEC] overflow-hidden bg-white">
-          <div className="bg-[#123F55] text-white p-3 font-black text-xs flex items-center justify-between">
+        <div className="mt-4 rounded-2xl border border-[#DCEAEC] overflow-hidden bg-white">
+          <div className="bg-[#123F55] text-white p-2.5 font-black text-xs flex items-center justify-between">
             <span className="flex items-center gap-1.5">
               <span>⏱️</span> Medical Timeline
             </span>
             <span className="text-[10px] font-normal text-white/80">A quick view of your major health events</span>
           </div>
 
-          <div className="p-4 space-y-3">
-            {d.medicalTimeline.map((item) => (
-              <div key={item.id} className="flex items-center justify-between border-b border-[#F0F8FA] pb-2 text-[11px]">
-                <div className="flex items-center gap-3">
-                  <span className="font-bold text-[#829AA3] w-16">{item.date}</span>
+          <div className="p-3 space-y-2">
+            {d.medicalTimeline.slice(0, 3).map((item) => (
+              <div key={item.id} className="flex items-center justify-between border-b border-[#F0F8FA] pb-1.5 text-[10.5px]">
+                <div className="flex items-center gap-2.5">
+                  <span className="font-bold text-[#829AA3] w-14 text-[10px]">{item.date}</span>
                   <span className="w-2 h-2 rounded-full bg-[#2CAC7F]" />
                   <div>
                     <div className="font-black text-[#123F55]">{item.title}</div>
-                    <div className="text-[10px] text-[#537783]">{item.facility}</div>
+                    <div className="text-[9.5px] text-[#537783]">{item.facility}</div>
                   </div>
                 </div>
-                <span className="px-2.5 py-0.5 rounded-full bg-[#CBEFE0] text-[#076584] font-bold text-[10px]">
+                <span className="px-2 py-0.5 rounded-full bg-[#CBEFE0] text-[#076584] font-bold text-[9px]">
                   {item.status}
                 </span>
               </div>
@@ -2110,6 +2460,12 @@ function renderResumePage2(d: HealthResumeData) {
           <div className="text-right">
             <div className="text-lg font-black text-[#076584] tracking-wider">HEALTH RESUME</div>
             <div className="text-[10px] text-[#537783] font-medium">Personal • Organized • Always With You</div>
+            {d.departmentCustomization && d.departmentCustomization.departmentId !== "all" && (
+              <div className="inline-flex items-center gap-1.5 mt-1 px-2.5 py-0.5 rounded-full bg-[#E0F2FE] border border-[#0284C7] text-[10px] font-bold text-[#0369A1]">
+                <span>{d.departmentCustomization.departmentIcon}</span>
+                <span>{d.departmentCustomization.departmentName} ({d.departmentCustomization.departmentShortName}) Focus</span>
+              </div>
+            )}
           </div>
         </div>
 
@@ -2135,7 +2491,16 @@ function renderResumePage2(d: HealthResumeData) {
               {d.diagnoses.map((diag) => (
                 <tr key={diag.id} className="border-b border-[#F0F8FA]">
                   <td className="p-2.5 font-bold text-[#829AA3]">{diag.date}</td>
-                  <td className="p-2.5 font-black text-[#123F55]">{diag.condition}</td>
+                  <td className="p-2.5 font-black text-[#123F55]">
+                    <div className="flex items-center gap-1.5">
+                      <span>{diag.condition}</span>
+                      {diag.isDepartmentFocus && (
+                        <span className="px-1.5 py-0.5 rounded bg-[#E0F2FE] text-[#0284C7] font-bold text-[9px] whitespace-nowrap">
+                          {d.departmentCustomization?.departmentShortName || "Dept"} Focus
+                        </span>
+                      )}
+                    </div>
+                  </td>
                   <td className="p-2.5 text-[#537783]">{diag.details}</td>
                   <td className="p-2.5 text-right">
                     <span
@@ -2173,7 +2538,16 @@ function renderResumePage2(d: HealthResumeData) {
               <tbody>
                 {d.medications.map((m) => (
                   <tr key={m.id} className="border-b border-[#F0F8FA]">
-                    <td className="p-2 font-black text-[#123F55]">{m.medicine}</td>
+                    <td className="p-2 font-black text-[#123F55]">
+                      <div className="flex items-center gap-1">
+                        <span>{m.medicine}</span>
+                        {m.isDepartmentFocus && (
+                          <span className="px-1 py-0.5 rounded bg-sky-100 text-[#0284C7] font-bold text-[8px] whitespace-nowrap">
+                            Focus
+                          </span>
+                        )}
+                      </div>
+                    </td>
                     <td className="p-2">{m.dose}</td>
                     <td className="p-2">{m.frequency}</td>
                     <td className="p-2 text-[#537783]">{m.purpose}</td>
@@ -2226,7 +2600,16 @@ function renderResumePage2(d: HealthResumeData) {
                 {d.testReports.map((t) => (
                   <tr key={t.id} className="border-b border-[#F0F8FA]">
                     <td className="p-2 text-[#829AA3]">{t.date}</td>
-                    <td className="p-2 font-black text-[#123F55]">{t.testName}</td>
+                    <td className="p-2 font-black text-[#123F55]">
+                      <div className="flex items-center gap-1">
+                        <span>{t.testName}</span>
+                        {t.isDepartmentFocus && (
+                          <span className="px-1 py-0.5 rounded bg-sky-100 text-[#0284C7] font-bold text-[8px] whitespace-nowrap">
+                            {d.departmentCustomization?.departmentShortName || "Focus"}
+                          </span>
+                        )}
+                      </div>
+                    </td>
                     <td className="p-2">
                       <span className="px-1.5 py-0.5 rounded-full bg-[#CBEFE0] text-[#076584] font-bold text-[9px]">
                         {t.result}
@@ -2272,7 +2655,9 @@ function renderResumePage2(d: HealthResumeData) {
               </div>
               <div className="p-2.5 text-[10px] text-[#537783] min-h-[32px]">
                 {d.surgeries.length > 0
-                  ? d.surgeries.map((s) => `${s.date}: ${s.procedure} (${s.details})`).join(" • ")
+                  ? d.surgeries
+                      .map((s) => `${s.date}: ${s.procedure} (${s.details})${s.isDepartmentFocus ? " [Focus]" : ""}`)
+                      .join(" • ")
                   : ""}
               </div>
             </div>

@@ -2,6 +2,7 @@
 
 import { useState, useEffect, type ReactNode } from "react";
 import { PulseProvider, usePulse } from "@/context/PulseContext";
+import { VaultUploadProvider } from "@/context/VaultUploadContext";
 import { useAuth } from "@/context/AuthContext";
 import { LoginScreen } from "@/components/LoginScreen";
 import { SplashScreen } from "@/components/SplashScreen";
@@ -118,7 +119,13 @@ function MainApp() {
 
 function UserScopedPulseProvider({ children }: { children: ReactNode }) {
   const { user } = useAuth();
-  return <PulseProvider key={user?.id ?? "anonymous"}>{children}</PulseProvider>;
+  return (
+    <PulseProvider key={user?.id ?? "anonymous"}>
+      <VaultUploadProvider>
+        {children}
+      </VaultUploadProvider>
+    </PulseProvider>
+  );
 }
 
 export default function HomePage() {

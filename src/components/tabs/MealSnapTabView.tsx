@@ -223,6 +223,8 @@ export function MealSnapTabView() {
     setVaultResult(null);
     setAnalysisError(null);
     setIsAnalyzing(true);
+    const abortController = new AbortController();
+    const timeoutId = setTimeout(() => abortController.abort(), 20000);
 
     try {
       const { dataUrl, mimeType } = await imagePromise;
@@ -232,11 +234,14 @@ export function MealSnapTabView() {
       const compressedFile = await compressImage(file);
       const formData = new FormData();
       formData.set("userId", userId ?? "");
+      formData.set("storageFolder", "diet-meals");
+      formData.set("message", "Analyze this meal and provide calories and macros.");
       formData.set("file", compressedFile);
       const response = await fetch("/api/agent/vault-ingest", {
         method: "POST",
         headers: session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : undefined,
-        body: formData
+        body: formData,
+        signal: abortController.signal
       });
       const responseText = await response.text();
       let parsedBody: unknown;
@@ -287,8 +292,12 @@ export function MealSnapTabView() {
       }
     } catch (error: unknown) {
       console.error("Meal Snap analysis failed.", error);
-      setAnalysisError(error instanceof Error ? error.message : "Meal analysis failed. Please try again.");
+      const message = abortController.signal.aborted
+        ? "Meal analysis timed out. Please try again with a clear photo."
+        : error instanceof Error ? error.message : "Meal analysis failed. Please try again.";
+      setAnalysisError(message);
     } finally {
+      clearTimeout(timeoutId);
       setIsAnalyzing(false);
     }
   }, [session, user, userId]);
